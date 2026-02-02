@@ -75,6 +75,13 @@ export async function renderOpticas(outlet){
                   <div class="form-text">Mock login: email que contenga <b>optica</b>.</div>
                 </div>
 
+                <!-- ✅ NUEVO: Contraseña -->
+                <div class="col-md-6">
+                  <label class="form-label">Contraseña</label>
+                  <input type="password" class="form-control" id="oPassword" placeholder="••••••••">
+                  <div class="form-text">Escribe una contraseña para crearla o cambiarla.</div>
+                </div>
+
                 <div class="col-md-6">
                   <label class="form-label">Métodos de pago permitidos</label>
                   <div class="form-check">
@@ -131,6 +138,9 @@ export async function renderOpticas(outlet){
     document.getElementById('oEmail').value = o?.email ?? '';
     document.getElementById('oActive').value = String(o?.active ?? true);
 
+    // ✅ Siempre vacío por seguridad (no mostramos contraseñas)
+    document.getElementById('oPassword').value = '';
+
     const pms = new Set(o?.paymentMethods || []);
     document.getElementById('pmCash').checked = pms.has('cash');
     document.getElementById('pmTransfer').checked = pms.has('transfer');
@@ -176,6 +186,13 @@ export async function renderOpticas(outlet){
       return;
     }
 
+    // ✅ password: solo si lo escriben
+    const password = (document.getElementById('oPassword').value || '').trim();
+    if(password && password.length < 6){
+      Swal.fire('Contraseña inválida','Debe tener al menos 6 caracteres.','info');
+      return;
+    }
+
     const payload = {
       nombre,
       contacto: document.getElementById('oContacto').value.trim(),
@@ -184,6 +201,8 @@ export async function renderOpticas(outlet){
       active: document.getElementById('oActive').value === 'true',
       paymentMethods
     };
+
+    if(password) payload.password = password;
 
     const id = document.getElementById('oId').value;
     if(id) await opticasService.update(id, payload);

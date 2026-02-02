@@ -15,6 +15,7 @@ import { showOverlay, hideOverlay } from './utils/spinners.js';
 const routes = {
   '#/login': async (root) => renderLogin(root),
   '#/register': async (root) => renderRegister(root),
+
   '#/pos': renderPOS,
   '#/inventory': renderInventory,
   '#/sales': renderSales,
@@ -27,8 +28,7 @@ function requireAuth(hash) {
   const publicRoutes = ['#/login', '#/register'];
   if (publicRoutes.includes(hash)) return true;
 
-  const token = authService.getToken();
-  if (!token) {
+  if (!authService.getToken()) {
     location.hash = '#/login';
     return false;
   }
@@ -37,24 +37,37 @@ function requireAuth(hash) {
 
 function requireRole(hash) {
   const role = authService.getRole();
-  const adminOnly = ['#/users', '#/opticas'];
-  const opticaAllowed = ['#/orders']; // óptica SOLO pedidos
 
+  // Admin-only
+  const adminOnly = ['#/users', '#/opticas'];
+
+  // Optica-only
+  const opticaOnly = ['#/orders'];
+
+  // Employee allowed (solo POS + Inventario)
+  const employeeAllowed = ['#/pos', '#/inventory'];
+
+  // --- ADMIN ---
   if (adminOnly.includes(hash) && role !== 'admin') {
     Swal.fire('Acceso restringido', 'Solo administradores.', 'warning');
     location.hash = role === 'optica' ? '#/orders' : '#/pos';
     return false;
   }
 
-  // ✅ La óptica SOLO ve pedidos
-  if (role === 'optica' && !opticaAllowed.includes(hash)) {
+  // --- ÓPTICA ---
+  if (role === 'optica' && !opticaOnly.includes(hash)) {
     location.hash = '#/orders';
     return false;
   }
-
-  // ✅ Rutas de óptica no accesibles por otros roles
-  if (opticaAllowed.includes(hash) && role !== 'optica') {
+  if (opticaOnly.includes(hash) && role !== 'optica') {
     Swal.fire('Acceso restringido', 'Solo ópticas.', 'warning');
+    location.hash = '#/pos';
+    return false;
+  }
+
+  // --- EMPLEADO ---
+  if (role === 'employee' && !employeeAllowed.includes(hash)) {
+    Swal.fire('Acceso restringido', 'Tu rol solo permite POS e Inventario.', 'warning');
     location.hash = '#/pos';
     return false;
   }
@@ -66,39 +79,32 @@ async function navigate() {
   const root = document.getElementById('appRoot');
   let hash = location.hash || '#/login';
 
-  // Si ruta no existe, manda a login o a lo que toque por rol
   if (!routes[hash]) {
-    const role = authService.getRole();
-    const token = authService.getToken();
-    if (!token) {
+    if (!authService.getToken()) {
       location.hash = '#/login';
       return;
     }
+    const role = authService.getRole();
     location.hash = role === 'optica' ? '#/orders' : '#/pos';
     return;
   }
 
-  // Auth
   if (!requireAuth(hash)) return;
 
   const isPublic = ['#/login', '#/register'].includes(hash);
-
-  // Si es pública, render directo
   if (isPublic) {
-    await routes[hash]?.(root);
+    await routes[hash](root);
     return;
   }
 
-  // ✅ Roles (IMPORTANTE: esto faltaba en tu app)
   if (!requireRole(hash)) return;
 
-  // Render layout + outlet
   root.innerHTML = renderLayout();
   const outlet = document.getElementById('outlet');
 
   showOverlay('Cargando…');
   try {
-    await routes[hash]?.(outlet);
+    await routes[hash](outlet);
   } catch (err) {
     console.error(err);
     Swal.fire('Error', 'Ocurrió un error cargando el módulo.', 'error');

@@ -55,12 +55,18 @@ export async function renderInventory(outlet){
           </tbody>
         </table>
       </div>
+
       <div class="small text-muted mt-2">
-        Nota: en modo mock, el CRUD no persiste; queda listo para conectar backend.
+        ${
+          canEdit
+            ? 'Nota: en modo mock, el CRUD no persiste; queda listo para conectar backend.'
+            : 'Modo empleado: solo lectura (no puedes agregar/editar/borrar).'
+        }
       </div>
     </div>
 
-    <!-- Modal -->
+    ${canEdit ? `
+    <!-- Modal (solo admin) -->
     <div class="modal fade" id="productModal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog modal-lg modal-dialog-scrollable">
         <div class="modal-content">
@@ -130,9 +136,10 @@ export async function renderInventory(outlet){
         </div>
       </div>
     </div>
+    ` : ''}
   `;
 
-  // DataTable
+  // DataTable (todos)
   if(window.$ && $.fn.dataTable){
     $('#tblInventory').DataTable({
       pageLength: 10,
@@ -146,8 +153,10 @@ export async function renderInventory(outlet){
     });
   }
 
+  // ✅ EMPLEADO: sale aquí y no monta nada de CRUD
   if(!canEdit) return;
 
+  // --- CRUD SOLO ADMIN ---
   const modalEl = document.getElementById('productModal');
   const modal = new bootstrap.Modal(modalEl);
 

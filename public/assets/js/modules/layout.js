@@ -6,7 +6,7 @@ export function renderLayout(){
 
   const links = [
     { hash: '#/pos', label: 'Punto de Venta', roles: ['admin','employee'] },
-    { hash: '#/inventory', label: 'Inventario', roles: ['admin','employee'] }, // employee solo lectura dentro del módulo
+    { hash: '#/inventory', label: 'Inventario', roles: ['admin','employee'] },
     { hash: '#/sales', label: 'Ventas / Reportes', roles: ['admin','employee'] },
     { hash: '#/users', label: 'Usuarios', roles: ['admin'] },
     { hash: '#/opticas', label: 'Ópticas', roles: ['admin'] },
@@ -17,21 +17,50 @@ export function renderLayout(){
 
   return `
   <div class="container-fluid">
+    <!-- HEADER MOBILE -->
+    <div class="d-lg-none d-flex align-items-center justify-content-between p-2 border-bottom bg-white">
+      <button class="btn btn-outline-secondary" id="btnToggleSidebar">
+        <i class="bi bi-list"></i>
+      </button>
+
+      <img 
+        src="assets/images/logo.png" 
+        alt="Logo" 
+        class="header-logo"
+      />
+
+      <div></div>
+    </div>
+
     <div class="row">
-      <aside class="col-12 col-lg-2 sidebar p-2">
-        <div class="p-3">
-          <div class="fw-bold text-brand fs-5">Laboratorio POS</div>
-          <div class="mt-2">
+      <!-- SIDEBAR -->
+      <aside class="sidebar col-12 col-lg-2 p-2" id="sidebar">
+        <div class="p-3 text-center">
+          <img 
+            src="assets/images/logo.png" 
+            alt="Logo" 
+            class="sidebar-logo mb-2"
+          />
+          <div>
             <span class="badge badge-role">${role}</span>
             <div class="small text-muted mt-1">${user.name}</div>
           </div>
         </div>
+
         <nav>
-          ${links.map(l => `<a class="${l.hash===current?'active':''}" href="${l.hash}">${l.label}</a>`).join('')}
+          ${links.map(l => `
+            <a class="${l.hash===current?'active':''}" href="${l.hash}">
+              ${l.label}
+            </a>
+          `).join('')}
           <a href="#" id="btnLogout" class="text-danger">Cerrar sesión</a>
         </nav>
       </aside>
 
+      <!-- OVERLAY MOBILE -->
+      <div class="sidebar-overlay d-lg-none" id="sidebarOverlay"></div>
+
+      <!-- CONTENT -->
       <main class="col-12 col-lg-10 p-3">
         <div id="outlet"></div>
       </main>
@@ -40,8 +69,9 @@ export function renderLayout(){
   `;
 }
 
+/* ================= INTERACCIONES ================= */
 document.addEventListener('click', (e)=>{
-  if(e.target?.id === 'btnLogout'){
+  if(e.target?.closest('#btnLogout')){
     e.preventDefault();
     Swal.fire({
       title: '¿Cerrar sesión?',
@@ -54,5 +84,15 @@ document.addEventListener('click', (e)=>{
         location.hash = '#/login';
       }
     });
+  }
+
+  if(e.target?.closest('#btnToggleSidebar')){
+    document.getElementById('sidebar')?.classList.toggle('open');
+    document.getElementById('sidebarOverlay')?.classList.toggle('show');
+  }
+
+  if(e.target?.id === 'sidebarOverlay'){
+    document.getElementById('sidebar')?.classList.remove('open');
+    document.getElementById('sidebarOverlay')?.classList.remove('show');
   }
 });
