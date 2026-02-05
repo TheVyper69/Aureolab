@@ -1,9 +1,13 @@
 import { api } from '../services/api.js';
 import { money } from '../utils/helpers.js';
+import { authService } from '../services/authService.js';
 
 let cart = [];
 
 export async function renderPOS(outlet){
+  const role = authService.getRole();
+  const isOptica = role === 'optica';
+
   const CRITICAL_STOCK = 3;
 
   const { data: products } = await api.get('/products');
@@ -17,6 +21,12 @@ export async function renderPOS(outlet){
   const getCartQty = (productId) =>
     Number(cart.find(x => Number(x.id) === Number(productId))?.qty ?? 0);
 
+  const safe = (v)=> String(v ?? '')
+    .replaceAll('&','&amp;')
+    .replaceAll('<','&lt;')
+    .replaceAll('>','&gt;')
+    .replaceAll('"','&quot;');
+
   const warnNoStock = (name='Producto')=>{
     Swal.fire({
       icon: 'warning',
@@ -26,13 +36,14 @@ export async function renderPOS(outlet){
     });
   };
 
+  const clampPct = (n)=> Math.min(100, Math.max(0, Number(n || 0)));
+
   const stockBadge = (st)=>{
     if(st <= 0) return `<span class="badge text-bg-secondary">Sin stock</span>`;
     if(st <= CRITICAL_STOCK) return `<span class="badge text-bg-danger">Crítico</span>`;
     return `<span class="badge text-bg-success">OK</span>`;
   };
 
-  // ✅ Placeholder SVG (sin archivo)
   const PLACEHOLDER_IMG =
     `data:image/svg+xml;utf8,` +
     encodeURIComponent(`
@@ -55,12 +66,37 @@ export async function renderPOS(outlet){
       </svg>
     `);
 
-  // ✅ SOLO FRONT: usa imageUrl si existe en el JSON mock; si no, placeholder
-  const getImageUrl = (p)=> (p.imageUrl || p.image_url || PLACEHOLDER_IMG);
+  const getImageUrl = (p)=> (p.imageUrl || p.image_url || p.imageBase64 || PLACEHOLDER_IMG);
 
+  const fmtGrad = (g)=>{
+    if(!g) return '—';
+    const sph = (g.sph ?? '').toString().trim();
+    const cyl = (g.cyl ?? '').toString().trim();
+    if(!sph && !cyl) return '—';
+    return `SPH: <b>${safe(sph || '—')}</b> · CYL: <b>${safe(cyl || '—')}</b>`;
+  };
+
+  const fmtBisel = (b)=>{
+    if(!b) return '—';
+    const axis = (b.axis ?? '').toString().trim();
+    const notes = (b.notes ?? '').toString().trim();
+    if(!axis && !notes) return '—';
+    return `Eje: <b>${safe(axis || '—')}</b>${notes ? `<br/>Notas: <b>${safe(notes)}</b>` : ''}`;
+  };
+
+  // ===================== FILTROS / UI =====================
   const categories = Array.from(new Set((products || []).map(p => p.category).filter(Boolean))).sort();
   let selectedCategory = 'ALL';
   let searchQuery = '';
+
+  // ✅ descuentos: modo + valor
+  let discountMode = 'order'; // 'order' | 'item'
+  let orderDiscountPct = 0;
+
+  const getOrderDiscountPct = ()=>{
+    if(isOptica) return 0;
+    return clampPct(orderDiscountPct);
+  };
 
   outlet.innerHTML = `
     <div class="d-flex align-items-center justify-content-between mb-3">
@@ -81,24 +117,37 @@ export async function renderPOS(outlet){
       </div>
 
       <div class="d-flex flex-wrap gap-3 align-items-center mt-3">
-        <div class="d-flex gap-2 align-items-center">
-          <label class="small text-muted m-0">Descuento (%)</label>
-          <input id="discount" type="number" min="0" max="100" value="0"
-                 class="form-control form-control-sm" style="max-width:110px;">
-        </div>
+        ${
+          isOptica
+            ? `<div class="small text-muted">Modo Óptica: sin descuentos</div>`
+            : `
+              <div class="d-flex flex-wrap gap-2 align-items-center">
+                <label class="small text-muted m-0">Descuento</label>
+
+                <select id="discountMode" class="form-select form-select-sm" style="max-width:170px;">
+                  <option value="order" selected>Por pedido total</option>
+                  <option value="item">Por producto</option>
+                </select>
+
+                <input id="orderDiscount" type="number" min="0" max="100" value="0"
+                       class="form-control form-control-sm" style="max-width:110px;"
+                       placeholder="%"
+                />
+                <span class="small text-muted" id="orderDiscountHint">Aplica a todo el pedido.</span>
+              </div>
+            `
+        }
         <div class="small text-muted">Stock crítico = ≤ ${CRITICAL_STOCK}</div>
       </div>
     </div>
 
     <div class="row g-3">
       <div class="col-lg-7">
-
         <div class="card p-3">
           <div class="d-flex align-items-center justify-content-between mb-2">
             <h6 class="mb-0">Productos</h6>
             <div class="small text-muted" id="posCount"></div>
           </div>
-
           <div id="productsGrid" class="row g-3"></div>
         </div>
 
@@ -137,7 +186,6 @@ export async function renderPOS(outlet){
             </table>
           </div>
         </div>
-
       </div>
 
       <div class="col-lg-5">
@@ -150,10 +198,18 @@ export async function renderPOS(outlet){
             <div>Subtotal</div>
             <div class="fw-bold" id="cartSubtotal">$0</div>
           </div>
-          <div class="d-flex justify-content-between">
-            <div>Descuento</div>
-            <div class="fw-bold" id="cartDiscount">$0</div>
-          </div>
+
+          ${
+            isOptica
+              ? ''
+              : `
+                <div class="d-flex justify-content-between">
+                  <div>Descuento</div>
+                  <div class="fw-bold" id="cartDiscount">$0</div>
+                </div>
+              `
+          }
+
           <div class="d-flex justify-content-between">
             <div>Total</div>
             <div class="fw-bold" id="cartTotal">$0</div>
@@ -185,7 +241,7 @@ export async function renderPOS(outlet){
     </div>
   `;
 
-  // ✅ DataTables SOLO stock
+  // DataTables stock
   if(window.$ && $.fn.dataTable){
     if($.fn.DataTable.isDataTable('#tblPosStock')){
       $('#tblPosStock').DataTable().destroy();
@@ -205,6 +261,19 @@ export async function renderPOS(outlet){
 
   const grid = outlet.querySelector('#productsGrid');
   const countEl = outlet.querySelector('#posCount');
+  const btnCheckout = outlet.querySelector('#btnCheckout');
+  const checkoutHint = outlet.querySelector('#checkoutHint');
+
+  // ===================== DESCUENTOS =====================
+  const discountModeSel = isOptica ? null : outlet.querySelector('#discountMode');
+  const orderDiscountInp = isOptica ? null : outlet.querySelector('#orderDiscount');
+  const orderDiscountHint = isOptica ? null : outlet.querySelector('#orderDiscountHint');
+
+  const setCheckoutState = ()=>{
+    const empty = cart.length === 0;
+    btnCheckout.disabled = empty;
+    checkoutHint.style.display = empty ? 'block' : 'none';
+  };
 
   const matchesFilter = (p)=>{
     const catOk = (selectedCategory === 'ALL') || (String(p.category) === String(selectedCategory));
@@ -231,14 +300,12 @@ export async function renderPOS(outlet){
       const disabled = st <= 0 ? 'disabled' : '';
       const critical = st > 0 && st <= CRITICAL_STOCK;
 
-      const img = getImageUrl(p);
-
       return `
         <div class="col-12 col-sm-6 col-xl-4">
           <div class="card h-100 ${critical ? 'border-warning' : ''}">
             <img
-              src="${img}"
-              alt="${String(p.name||'Producto').replaceAll('"','&quot;')}"
+              src="${getImageUrl(p)}"
+              alt="${safe(p.name||'Producto')}"
               class="card-img-top"
               style="height:140px; object-fit:cover;"
               loading="lazy"
@@ -246,16 +313,18 @@ export async function renderPOS(outlet){
             />
             <div class="card-body d-flex flex-column">
               <div class="d-flex align-items-start justify-content-between gap-2">
-                <div class="fw-semibold">${p.name}</div>
+                <div class="fw-semibold" style="white-space: normal; overflow: visible;">
+                  ${safe(p.name)}
+                </div>
                 <div class="text-end">
-                  <div class="small text-muted">${p.sku}</div>
+                  <div class="small text-muted">${safe(p.sku)}</div>
                   <div>${stockBadge(st)}</div>
                 </div>
               </div>
 
               <div class="small text-muted mt-1">
-                ${p.category ? `<span class="me-2"><b>${p.category}</b></span>` : ''}
-                ${p.type ? `<span>${p.type}</span>` : ''}
+                ${p.category ? `<span class="me-2"><b>${safe(p.category)}</b></span>` : ''}
+                ${p.type ? `<span>${safe(p.type)}</span>` : ''}
               </div>
 
               <div class="mt-2 d-flex align-items-center justify-content-between">
@@ -265,13 +334,17 @@ export async function renderPOS(outlet){
                 </div>
               </div>
 
-              <div class="mt-3 d-grid">
-                <button class="btn btn-brand" data-add="${p.id}" ${disabled}>Agregar</button>
+              <div class="mt-3 d-flex gap-2">
+                <button class="btn btn-brand flex-grow-1" data-add="${p.id}" ${disabled}>Agregar</button>
+                <button class="btn btn-outline-brand btn-sm" data-details="${p.id}" title="Ver detalles">
+                  Detalles
+                </button>
               </div>
 
-              ${st <= 0
-                ? `<div class="small text-muted mt-2">Sin stock</div>`
-                : (critical ? `<div class="small text-danger mt-2">Stock crítico</div>` : ``)
+              ${
+                st <= 0
+                  ? `<div class="small text-muted mt-2">Sin stock</div>`
+                  : (critical ? `<div class="small text-danger mt-2">Stock crítico</div>` : ``)
               }
             </div>
           </div>
@@ -280,22 +353,125 @@ export async function renderPOS(outlet){
     }).join('');
   };
 
-  const discountInput = outlet.querySelector('#discount');
-  const btnCheckout = outlet.querySelector('#btnCheckout');
-  const checkoutHint = outlet.querySelector('#checkoutHint');
+  // ===================== DETALLE PRODUCTO =====================
+  const showProductDetails = async (p)=>{
+    const st = getStock(p.id);
+    const desc = (p.description ?? '').toString().trim();
+    const g = p.graduation || null;
+    const b = p.bisel || null;
+    const cat = (p.category || '').toString();
 
-  const setCheckoutState = ()=>{
-    const empty = cart.length === 0;
-    btnCheckout.disabled = empty;
-    checkoutHint.style.display = empty ? 'block' : 'none';
+    const graduacionHtml =
+      (cat === 'MICAS' || cat === 'LENTES_CONTACTO')
+        ? `<div class="mt-3"><div class="fw-semibold">Graduación</div><div class="small text-muted">${fmtGrad(g)}</div></div>`
+        : `<div class="mt-3"><div class="fw-semibold">Graduación</div><div class="small text-muted">—</div></div>`;
+
+    const biselHtml =
+      (cat === 'BISEL')
+        ? `<div class="mt-3"><div class="fw-semibold">Bisel</div><div class="small text-muted">${fmtBisel(b)}</div></div>`
+        : `<div class="mt-3"><div class="fw-semibold">Bisel</div><div class="small text-muted">—</div></div>`;
+
+    const buyPriceHtml = isOptica ? '' : `
+      <div class="col-6">
+        <div class="small text-muted">Precio compra</div>
+        <div class="fw-semibold">${money(p.buyPrice ?? 0)}</div>
+      </div>
+    `;
+
+    const html = `
+      <div class="text-start">
+        <div class="d-flex gap-3 align-items-start">
+          <img
+            src="${getImageUrl(p)}"
+            alt="${safe(p.name)}"
+            style="width:120px;height:120px;object-fit:cover;border-radius:12px;border:1px solid #e9ecef;"
+            onerror="this.onerror=null; this.src='${PLACEHOLDER_IMG}';"
+          />
+          <div style="min-width:0;">
+            <div class="fw-bold">${safe(p.name)}</div>
+            <div class="small text-muted">${safe(p.sku)}</div>
+            <div class="mt-1">${stockBadge(st)} <span class="small text-muted ms-2">Stock: <b>${st}</b></span></div>
+            <div class="mt-2 fw-bold">${money(p.salePrice ?? 0)}</div>
+          </div>
+        </div>
+
+        <hr class="my-3"/>
+
+        <div class="row g-2">
+          <div class="col-6">
+            <div class="small text-muted">Categoría</div>
+            <div class="fw-semibold">${safe(p.category || '—')}</div>
+          </div>
+          <div class="col-6">
+            <div class="small text-muted">Tipo</div>
+            <div class="fw-semibold">${safe(p.type || '—')}</div>
+          </div>
+
+          ${buyPriceHtml}
+
+          <div class="col-6">
+            <div class="small text-muted">Proveedor</div>
+            <div class="fw-semibold">${safe(p.supplier || '—')}</div>
+          </div>
+        </div>
+
+        <div class="mt-3">
+          <div class="fw-semibold">Descripción</div>
+          <div class="small text-muted">${desc ? safe(desc) : '—'}</div>
+        </div>
+
+        ${graduacionHtml}
+        ${biselHtml}
+      </div>
+    `;
+
+    await Swal.fire({
+      title: 'Detalle del producto',
+      html,
+      width: 720,
+      showCancelButton: true,
+      confirmButtonText: 'Agregar al carrito',
+      cancelButtonText: 'Cerrar',
+      focusConfirm: false
+    }).then(r=>{
+      if(r.isConfirmed){
+        addToCart(p);
+      }
+    });
+  };
+
+  // ===================== CARRITO + DESCUENTO =====================
+  const calcTotals = ()=>{
+    const subtotal = cart.reduce((a,i)=> a + (Number(i.salePrice||0) * Number(i.qty||0)), 0);
+
+    if(isOptica){
+      return { subtotal, discountAmount: 0, total: subtotal, orderDiscountPct: 0 };
+    }
+
+    if(discountMode === 'order'){
+      const pct = clampPct(orderDiscountPct);
+      const discountAmount = subtotal * (pct/100);
+      const total = subtotal - discountAmount;
+      return { subtotal, discountAmount, total, orderDiscountPct: pct };
+    }
+
+    // item
+    let discountAmount = 0;
+    for(const it of cart){
+      const pct = clampPct(it.itemDiscountPct || 0);
+      discountAmount += (Number(it.salePrice||0) * Number(it.qty||0)) * (pct/100);
+    }
+    const total = subtotal - discountAmount;
+    return { subtotal, discountAmount, total, orderDiscountPct: 0 };
   };
 
   const renderCart = ()=>{
     const box = outlet.querySelector('#cartBox');
+
     if(cart.length === 0){
       box.innerHTML = `<div class="text-muted">Carrito vacío</div>`;
       outlet.querySelector('#cartSubtotal').textContent = money(0);
-      outlet.querySelector('#cartDiscount').textContent = money(0);
+      if(!isOptica) outlet.querySelector('#cartDiscount').textContent = money(0);
       outlet.querySelector('#cartTotal').textContent = money(0);
       setCheckoutState();
       return;
@@ -305,13 +481,30 @@ export async function renderPOS(outlet){
       const st = getStock(it.id);
       const atLimit = it.qty >= st;
 
+      const itemDisc = isOptica ? '' : `
+        <div class="mt-1 ${discountMode==='item' ? '' : 'd-none'}" data-itemdiscbox="${it.id}">
+          <div class="d-flex align-items-center gap-2">
+            <span class="small text-muted">Desc %</span>
+            <input type="number" min="0" max="100"
+              class="form-control form-control-sm"
+              style="max-width:90px;"
+              value="${clampPct(it.itemDiscountPct || 0)}"
+              data-itemdisc="${it.id}"
+              ${discountMode==='item' ? '' : 'disabled'}
+            />
+          </div>
+        </div>
+      `;
+
       return `
         <div class="d-flex justify-content-between border rounded p-2 mb-2">
-          <div>
-            <div class="fw-semibold">${it.name}</div>
-            <div class="small text-muted">${it.sku} · ${money(it.salePrice)} · Stock: ${st}</div>
+          <div style="min-width:0;">
+            <div class="fw-semibold">${safe(it.name)}</div>
+            <div class="small text-muted">${safe(it.sku)} · ${money(it.salePrice)} · Stock: ${st}</div>
             ${st<=CRITICAL_STOCK && st>0 ? `<div class="small text-danger">Stock crítico</div>` : ``}
+            ${itemDisc}
           </div>
+
           <div class="d-flex gap-2 align-items-center">
             <button class="btn btn-sm btn-outline-secondary" data-dec="${it.id}">-</button>
             <div class="fw-bold">${it.qty}</div>
@@ -322,14 +515,10 @@ export async function renderPOS(outlet){
       `;
     }).join('');
 
-    const subtotal = cart.reduce((a,i)=>a+i.salePrice*i.qty,0);
-    const pct = Math.min(100, Math.max(0, Number(discountInput.value||0)));
-    const disc = subtotal*(pct/100);
-    const total = subtotal-disc;
-
-    outlet.querySelector('#cartSubtotal').textContent = money(subtotal);
-    outlet.querySelector('#cartDiscount').textContent = money(disc);
-    outlet.querySelector('#cartTotal').textContent = money(total);
+    const t = calcTotals();
+    outlet.querySelector('#cartSubtotal').textContent = money(t.subtotal);
+    if(!isOptica) outlet.querySelector('#cartDiscount').textContent = money(t.discountAmount);
+    outlet.querySelector('#cartTotal').textContent = money(t.total);
 
     setCheckoutState();
   };
@@ -344,15 +533,19 @@ export async function renderPOS(outlet){
     }
 
     const found = cart.find(i=>Number(i.id)===Number(p.id));
-    found ? found.qty++ : cart.push({ ...p, qty: 1 });
-
+    if(found){
+      found.qty++;
+    }else{
+      cart.push({ ...p, qty: 1, itemDiscountPct: 0 });
+    }
     renderCart();
     return true;
   };
 
-  // Eventos (categorías + agregar + carrito)
+  // ===================== EVENTOS =====================
   outlet.addEventListener('click', (e)=>{
     const addId = e.target?.dataset?.add;
+    const detailsId = e.target?.dataset?.details;
     const incId = e.target?.dataset?.inc;
     const decId = e.target?.dataset?.dec;
     const delId = e.target?.dataset?.del;
@@ -360,14 +553,18 @@ export async function renderPOS(outlet){
 
     if(catBtn){
       selectedCategory = String(catBtn.dataset.cat || 'ALL');
-
       outlet.querySelectorAll('#posCategories [data-cat]').forEach(b=>{
         const isActive = String(b.dataset.cat) === selectedCategory;
         b.classList.toggle('btn-brand', isActive);
         b.classList.toggle('btn-outline-brand', !isActive);
       });
-
       renderCards();
+      return;
+    }
+
+    if(detailsId){
+      const p = products.find(x=>String(x.id)===String(detailsId));
+      if(p) showProductDetails(p);
       return;
     }
 
@@ -407,17 +604,56 @@ export async function renderPOS(outlet){
     }
   });
 
-  // Búsqueda
+  // búsqueda
   outlet.querySelector('#posSearch').addEventListener('input', (e)=>{
     searchQuery = String(e.target.value || '');
     renderCards();
   });
 
-  // Descuento
-  discountInput.addEventListener('input', renderCart);
+  // ✅ descuento: modo + pedido
+  if(!isOptica){
+    discountModeSel.addEventListener('change', ()=>{
+      discountMode = discountModeSel.value === 'item' ? 'item' : 'order';
 
-  // Cobrar
-  btnCheckout.addEventListener('click', async ()=>{
+      if(discountMode === 'order'){
+        orderDiscountHint.textContent = 'Aplica a todo el pedido.';
+        orderDiscountInp.disabled = false;
+      }else{
+        orderDiscountHint.textContent = 'Define descuento por cada producto en el carrito.';
+        orderDiscountInp.disabled = true;
+      }
+
+      // mostrar/ocultar inputs por item
+      outlet.querySelectorAll('[data-itemdiscbox]').forEach(box=>{
+        box.classList.toggle('d-none', discountMode !== 'item');
+      });
+      outlet.querySelectorAll('[data-itemdisc]').forEach(inp=>{
+        inp.disabled = discountMode !== 'item';
+      });
+
+      renderCart();
+    });
+
+    orderDiscountInp.addEventListener('input', ()=>{
+      orderDiscountPct = clampPct(orderDiscountInp.value);
+      renderCart();
+    });
+
+    // input descuento por item (delegado)
+    outlet.addEventListener('input', (e)=>{
+      const pid = e.target?.dataset?.itemdisc;
+      if(!pid) return;
+      if(discountMode !== 'item') return;
+
+      const it = cart.find(x=>String(x.id)===String(pid));
+      if(!it) return;
+      it.itemDiscountPct = clampPct(e.target.value);
+      renderCart();
+    });
+  }
+
+  // checkout
+  outlet.querySelector('#btnCheckout').addEventListener('click', async ()=>{
     if(cart.length === 0) return;
 
     for(const it of cart){
@@ -430,14 +666,17 @@ export async function renderPOS(outlet){
     const method = outlet.querySelector('#payMethod').value;
     const customerName = outlet.querySelector('#customerName').value || 'Mostrador';
 
-    const subtotal = cart.reduce((a,i)=>a+i.salePrice*i.qty,0);
-    const pct = Math.min(100, Math.max(0, Number(discountInput.value||0)));
-    const disc = subtotal*(pct/100);
-    const total = subtotal-disc;
+    const t = calcTotals();
+
+    const discTxt = isOptica
+      ? '—'
+      : (discountMode === 'order'
+          ? `${t.orderDiscountPct}% (pedido)`
+          : 'Por producto');
 
     const ok = await Swal.fire({
       title:'Confirmar venta',
-      html:`Cliente: <b>${customerName}</b><br>Total: <b>${money(total)}</b><br>Pago: <b>${method}</b>`,
+      html:`Cliente: <b>${safe(customerName)}</b><br>Total: <b>${money(t.total)}</b><br>Descuento: <b>${safe(discTxt)}</b><br>Pago: <b>${safe(method)}</b>`,
       icon:'question',
       showCancelButton:true,
       confirmButtonText:'Procesar'
@@ -449,10 +688,12 @@ export async function renderPOS(outlet){
       items: cart,
       method,
       customerName,
-      subtotal,
-      discountPct: pct,
-      discountAmount: disc,
-      total
+      subtotal: t.subtotal,
+      discountMode: isOptica ? 'none' : discountMode,
+      orderDiscountPct: isOptica ? 0 : (discountMode==='order' ? t.orderDiscountPct : 0),
+      itemDiscounts: isOptica ? [] : (discountMode==='item' ? cart.map(i=>({ productId: i.id, pct: clampPct(i.itemDiscountPct||0) })) : []),
+      discountAmount: t.discountAmount,
+      total: t.total
     });
 
     cart = [];
@@ -464,4 +705,9 @@ export async function renderPOS(outlet){
   renderCards();
   renderCart();
   setCheckoutState();
+
+  // inicializa modo descuento (si aplica)
+  if(!isOptica){
+    discountModeSel.dispatchEvent(new Event('change'));
+  }
 }

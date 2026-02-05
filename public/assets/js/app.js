@@ -39,15 +39,15 @@ function requireRole(hash) {
   const role = authService.getRole();
 
   // Admin-only
-  const adminOnly = ['#/users', '#/opticas'];
+  const adminOnly = ['#/users', '#/opticas', '#/sales'];
 
-  // Optica-only
-  const opticaOnly = ['#/orders'];
+  // ✅ Óptica allowed
+  const opticaAllowed = ['#/pos', '#/orders'];
 
-  // Employee allowed (solo POS + Inventario)
-  const employeeAllowed = ['#/pos', '#/inventory'];
+  // ✅ Employee allowed (ahora también #/orders)
+  const employeeAllowed = ['#/pos', '#/inventory', '#/orders'];
 
-  // --- ADMIN ---
+  // --- ADMIN-ONLY ---
   if (adminOnly.includes(hash) && role !== 'admin') {
     Swal.fire('Acceso restringido', 'Solo administradores.', 'warning');
     location.hash = role === 'optica' ? '#/orders' : '#/pos';
@@ -55,19 +55,14 @@ function requireRole(hash) {
   }
 
   // --- ÓPTICA ---
-  if (role === 'optica' && !opticaOnly.includes(hash)) {
+  if (role === 'optica' && !opticaAllowed.includes(hash)) {
     location.hash = '#/orders';
-    return false;
-  }
-  if (opticaOnly.includes(hash) && role !== 'optica') {
-    Swal.fire('Acceso restringido', 'Solo ópticas.', 'warning');
-    location.hash = '#/pos';
     return false;
   }
 
   // --- EMPLEADO ---
   if (role === 'employee' && !employeeAllowed.includes(hash)) {
-    Swal.fire('Acceso restringido', 'Tu rol solo permite POS e Inventario.', 'warning');
+    Swal.fire('Acceso restringido', 'Tu rol solo permite POS, Inventario y Pedidos.', 'warning');
     location.hash = '#/pos';
     return false;
   }
@@ -85,7 +80,7 @@ async function navigate() {
       return;
     }
     const role = authService.getRole();
-    location.hash = role === 'optica' ? '#/orders' : '#/pos';
+    location.hash = (role === 'optica') ? '#/orders' : '#/pos';
     return;
   }
 

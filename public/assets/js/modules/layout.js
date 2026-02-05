@@ -5,12 +5,12 @@ export function renderLayout(){
   const user = authService.getUser() || { name: 'Usuario' };
 
   const links = [
-    { hash: '#/pos', label: 'Punto de Venta', roles: ['admin','employee'] },
-    { hash: '#/inventory', label: 'Inventario', roles: ['admin','employee'] },
-    { hash: '#/sales', label: 'Ventas / Reportes', roles: ['admin','employee'] },
-    { hash: '#/users', label: 'Usuarios', roles: ['admin'] },
-    { hash: '#/opticas', label: 'Ópticas', roles: ['admin'] },
-    { hash: '#/orders', label: 'Pedidos', roles: ['optica'] }
+    { hash: '#/pos',       label: 'Punto de Venta',    roles: ['admin','employee','optica'] },
+    { hash: '#/inventory', label: 'Inventario',        roles: ['admin','employee'] },
+    { hash: '#/sales',     label: 'Ventas / Reportes', roles: ['admin'] },
+    { hash: '#/users',     label: 'Usuarios',          roles: ['admin'] },
+    { hash: '#/opticas',   label: 'Ópticas',           roles: ['admin'] },
+    { hash: '#/orders',    label: 'Pedidos',           roles: ['optica','employee','admin'] } // ✅
   ].filter(l => l.roles.includes(role));
 
   const current = location.hash || '#/pos';
@@ -84,14 +84,23 @@ document.addEventListener('click', (e)=>{
         location.hash = '#/login';
       }
     });
+    return;
   }
 
   if(e.target?.closest('#btnToggleSidebar')){
     document.getElementById('sidebar')?.classList.toggle('open');
     document.getElementById('sidebarOverlay')?.classList.toggle('show');
+    return;
   }
 
   if(e.target?.id === 'sidebarOverlay'){
+    document.getElementById('sidebar')?.classList.remove('open');
+    document.getElementById('sidebarOverlay')?.classList.remove('show');
+    return;
+  }
+
+  const navLink = e.target?.closest('aside#sidebar nav a[href^="#/"]');
+  if(navLink){
     document.getElementById('sidebar')?.classList.remove('open');
     document.getElementById('sidebarOverlay')?.classList.remove('show');
   }
