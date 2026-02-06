@@ -22,10 +22,6 @@ const PROCESS_BADGE = {
   revision: 'text-bg-danger'
 };
 
-function unique(arr) {
-  return Array.from(new Set((arr || []).filter(Boolean)));
-}
-
 function safe(v){
   return String(v ?? '')
     .replaceAll('&','&amp;')
@@ -47,17 +43,9 @@ function buildProductMap(products){
 
 /* ====== update helper (mock-friendly) ====== */
 async function updateOrderPatch(orderId, patch){
-  // Intenta varios nombres para no romperte si cambia tu service
-  if (typeof ordersService.update === 'function') {
-    return await ordersService.update(orderId, patch);
-  }
-  if (typeof ordersService.patch === 'function') {
-    return await ordersService.patch(orderId, patch);
-  }
-  if (typeof ordersService.updateStatus === 'function') {
-    return await ordersService.updateStatus(orderId, patch);
-  }
-  // fallback: no persistente
+  if (typeof ordersService.update === 'function') return await ordersService.update(orderId, patch);
+  if (typeof ordersService.patch === 'function') return await ordersService.patch(orderId, patch);
+  if (typeof ordersService.updateStatus === 'function') return await ordersService.updateStatus(orderId, patch);
   console.warn('ordersService no tiene update/patch/updateStatus. Update será solo visual en esta sesión.');
   return null;
 }
@@ -80,11 +68,23 @@ function badgeHtml(type, value){
 }
 
 async function showOrderDetail(order, productsMap, opticasById, ctx){
-  // ctx: { role, onLocalUpdate(orderId, patch) }
   const role = ctx?.role || authService.getRole();
-
   const o = normalizeOrder(order);
+
   const opticaName = opticasById.get(String(o.opticaId))?.nombre || `Óptica #${o.opticaId || '—'}`;
+  const createdBy = o.createdByName || o.createdByEmail || '—';
+  const createdRole = o.createdByRole || '—';
+
+  const paySt = o.paymentStatus || 'pendiente';
+  const procSt = o.processStatus || 'en_proceso';
+
+  const canAdminEditPayment = role === 'admin';
+  const canEditProcess = (role === 'admin' || role === 'employee');
+  const employeeLocked = (role === 'employee' && procSt === 'entregado');
+
+  const procOptionsEmployee = ['en_proceso','listo_para_entregar','entregado'];
+  const procOptionsAdmin = ['en_proceso','listo_para_entregar','entregado','revision'];
+  const procOptions = (role === 'admin') ? procOptionsAdmin : procOptionsEmployee;
 
   const items = (o.items || []).map(it=>{
     const p = productsMap.get(String(it.productId)) || {};
@@ -98,82 +98,59 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
         <td class="text-end fw-semibold">${money(line)}</td>
       </tr>
     `;
-  }).join('') || `
-    <tr><td colspan="5" class="text-muted">Sin items</td></tr>
-  `;
+  }).join('') || `<tr><td colspan="5" class="text-muted">Sin items</td></tr>`;
 
-  const createdBy = o.createdByName || o.createdByEmail || '—';
-  const createdRole = o.createdByRole || '—';
+  const controlsHtml = (role === 'optica')
+    ? '' // ✅ óptica solo ve detalle, no cambia estatus
+    : `
+      <div class="mt-3 p-3 border rounded bg-light">
+        <div class="fw-semibold mb-2">Cambios de estatus</div>
 
-  const paySt = o.paymentStatus || 'pendiente';
-  const procSt = o.processStatus || 'en_proceso';
+        <div class="row g-2">
+          <div class="col-md-6">
+            <div class="small text-muted">Estatus de pago</div>
+            ${
+              canAdminEditPayment
+                ? `
+                  <select class="form-select form-select-sm" id="selPaymentStatus">
+                    ${['pendiente','pagado'].map(v=>`
+                      <option value="${v}" ${v===paySt?'selected':''}>${PAYMENT_LABEL[v]}</option>
+                    `).join('')}
+                  </select>
+                `
+                : `<div>${badgeHtml('payment', paySt)} <span class="small text-muted ms-2">(solo admin)</span></div>`
+            }
+          </div>
 
-  // Reglas UI:
-  const canAdminEditPayment = role === 'admin';
-  const canEditProcess = (role === 'admin' || role === 'employee');
-  const employeeLocked = (role === 'employee' && procSt === 'entregado');
-
-  // Opciones proceso:
-  const procOptionsEmployee = ['en_proceso','listo_para_entregar','entregado'];
-  const procOptionsAdmin = ['en_proceso','listo_para_entregar','entregado','revision'];
-
-  const procOptions = (role === 'admin') ? procOptionsAdmin : procOptionsEmployee;
-
-  const controlsHtml = `
-    <div class="mt-3 p-3 border rounded bg-light">
-      <div class="fw-semibold mb-2">Cambios de estatus</div>
-
-      <div class="row g-2">
-        <div class="col-md-6">
-          <div class="small text-muted">Estatus de pago</div>
-          ${
-            canAdminEditPayment
-              ? `
-                <select class="form-select form-select-sm" id="selPaymentStatus">
-                  ${['pendiente','pagado'].map(v=>`
-                    <option value="${v}" ${v===paySt?'selected':''}>${PAYMENT_LABEL[v]}</option>
-                  `).join('')}
-                </select>
-              `
-              : `
-                <div>${badgeHtml('payment', paySt)} <span class="small text-muted ms-2">(solo admin)</span></div>
-              `
-          }
+          <div class="col-md-6">
+            <div class="small text-muted">Estatus de proceso</div>
+            ${
+              canEditProcess
+                ? `
+                  <select class="form-select form-select-sm" id="selProcessStatus" ${employeeLocked?'disabled':''}>
+                    ${procOptions.map(v=>`
+                      <option value="${v}" ${v===procSt?'selected':''}>${PROCESS_LABEL[v]}</option>
+                    `).join('')}
+                  </select>
+                  ${
+                    employeeLocked
+                      ? `<div class="small text-muted mt-1">Entregado: solo admin puede moverlo a <b>Revisión</b>.</div>`
+                      : (role==='employee'
+                          ? `<div class="small text-muted mt-1">Si lo cambias a <b>Entregado</b>, ya no podrás modificarlo.</div>`
+                          : `<div class="small text-muted mt-1">Admin puede usar <b>Revisión</b> para inconformidades.</div>`
+                        )
+                  }
+                `
+                : `<div>${badgeHtml('process', procSt)}</div>`
+            }
+          </div>
         </div>
 
-        <div class="col-md-6">
-          <div class="small text-muted">Estatus de proceso</div>
-          ${
-            canEditProcess
-              ? `
-                <select class="form-select form-select-sm" id="selProcessStatus" ${employeeLocked?'disabled':''}>
-                  ${procOptions.map(v=>`
-                    <option value="${v}" ${v===procSt?'selected':''}>${PROCESS_LABEL[v]}</option>
-                  `).join('')}
-                </select>
-                ${
-                  employeeLocked
-                    ? `<div class="small text-muted mt-1">El pedido está <b>Entregado</b>. Solo admin puede moverlo a <b>Revisión</b>.</div>`
-                    : (role==='employee'
-                        ? `<div class="small text-muted mt-1">Nota: si lo cambias a <b>Entregado</b>, ya no podrás modificarlo.</div>`
-                        : `<div class="small text-muted mt-1">Admin puede usar <b>Revisión</b> para inconformidades.</div>`
-                      )
-                }
-              `
-              : `
-                <div>${badgeHtml('process', procSt)}</div>
-              `
-          }
+        <div class="d-flex justify-content-end mt-3">
+          <button class="btn btn-sm btn-brand" id="btnSaveStatus">Guardar cambios</button>
         </div>
       </div>
-
-      <div class="d-flex justify-content-end mt-3">
-        <button class="btn btn-sm btn-brand" id="btnSaveStatus" ${(!canAdminEditPayment && !canEditProcess) ? 'disabled' : ''}>
-          Guardar cambios
-        </button>
-      </div>
-    </div>
-  `;
+    `;
 
   const html = `
     <div class="text-start">
@@ -243,7 +220,6 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
     </div>
   `;
 
-  // SweetAlert con hook didOpen para bind
   await Swal.fire({
     title: `Detalle del pedido #${o.id}`,
     html,
@@ -251,36 +227,34 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
     icon: 'info',
     confirmButtonText: 'Cerrar',
     didOpen: () => {
+      // Óptica no cambia nada
+      if(role === 'optica') return;
+
       const btn = Swal.getHtmlContainer()?.querySelector('#btnSaveStatus');
       if(!btn) return;
 
       btn.addEventListener('click', async () => {
-        // lee selects si existen
         const selPay = Swal.getHtmlContainer()?.querySelector('#selPaymentStatus');
         const selProc = Swal.getHtmlContainer()?.querySelector('#selProcessStatus');
 
         const nextPay = selPay ? selPay.value : paySt;
         const nextProc = selProc ? selProc.value : procSt;
 
-        // ===== Reglas hard (seguridad en UI) =====
-        // 1) paymentStatus SOLO admin
+        // reglas
         if(nextPay !== paySt && role !== 'admin'){
           Swal.fire('No permitido', 'Solo admin puede cambiar el estatus de pago.', 'warning');
           return;
         }
 
-        // 2) processStatus: admin/employee
         if(nextProc !== procSt){
           if(!(role === 'admin' || role === 'employee')){
             Swal.fire('No permitido', 'Tu rol no puede cambiar el estatus de proceso.', 'warning');
             return;
           }
-          // 3) employee NO puede tocar si está entregado
           if(role === 'employee' && procSt === 'entregado'){
-            Swal.fire('Bloqueado', 'El pedido está Entregado. Solo admin puede moverlo a Revisión.', 'warning');
+            Swal.fire('Bloqueado', 'Entregado: solo admin puede moverlo a Revisión.', 'warning');
             return;
           }
-          // 4) revision solo admin
           if(role !== 'admin' && nextProc === 'revision'){
             Swal.fire('No permitido', 'Solo admin puede poner el pedido en Revisión.', 'warning');
             return;
@@ -294,10 +268,7 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
 
         const confirm = await Swal.fire({
           title: 'Confirmar cambios',
-          html: `
-            Pago: ${badgeHtml('payment', nextPay)}<br/>
-            Proceso: ${badgeHtml('process', nextProc)}
-          `,
+          html: `Pago: ${badgeHtml('payment', nextPay)}<br/>Proceso: ${badgeHtml('process', nextProc)}`,
           icon: 'question',
           showCancelButton: true,
           confirmButtonText: 'Guardar'
@@ -310,9 +281,7 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
 
         try{
           await updateOrderPatch(o.id, patch);
-          // actualiza local (tabla) para esta vista
           if(typeof ctx?.onLocalUpdate === 'function') ctx.onLocalUpdate(o.id, patch);
-
           Swal.fire('Listo', 'Estatus actualizado (mock).', 'success');
         }catch(err){
           console.error(err);
@@ -324,49 +293,35 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
 }
 
 /* =========================
-   VISTA ÓPTICA
+   VISTA ÓPTICA (SIN FORMULARIO)
    ========================= */
 async function renderOpticaOrders(outlet){
   const { data: products } = await api.get('/products');
   const { data: inventory } = await api.get('/inventory');
   const allOrdersRaw = await ordersService.list();
+  const allOrders = (allOrdersRaw || []).map(normalizeOrder);
 
   const me = authService.getUser();
   const email = (me?.email || '').toLowerCase();
   const opticas = await loadOpticasDb();
+  const opticasById = new Map((opticas || []).map(o => [String(o.id), o]));
 
   const optica =
     (opticas || []).find(o => String(o.email || '').toLowerCase() === email) ||
     (opticas || [])[0];
 
   const opticaId = optica?.id || 1;
-  const allowed = optica?.paymentMethods || ['cash', 'transfer'];
-
-  const allOrders = (allOrdersRaw || []).map(normalizeOrder);
 
   const myOrders = allOrders
     .filter(o => Number(o.opticaId) === Number(opticaId))
     .sort((a, b) => new Date(b.date) - new Date(a.date));
 
-  const categories = unique(products.map(p => p.category));
-  const types = unique(products.map(p => p.type));
-
   const productsMap = buildProductMap(products);
-  const opticasById = new Map((opticas || []).map(o => [String(o.id), o]));
 
-  // helper: update local array (para que cambie en tabla sin recargar)
-  const onLocalUpdate = (orderId, patch)=>{
-    const idx = myOrders.findIndex(x=>String(x.id)===String(orderId));
-    if(idx >= 0) myOrders[idx] = normalizeOrder({ ...myOrders[idx], ...patch });
-    const idxAll = allOrders.findIndex(x=>String(x.id)===String(orderId));
-    if(idxAll >= 0) allOrders[idxAll] = normalizeOrder({ ...allOrders[idxAll], ...patch });
-
-    // refresca la tabla simple (sin DataTables) re-render rápido
-    // (mis pedidos aquí NO usa DataTables)
+  const renderMyOrdersTbody = ()=>{
     const tbody = outlet.querySelector('#tblMyOrders tbody');
     if(!tbody) return;
-
-    tbody.innerHTML = myOrders.map(o => {
+    tbody.innerHTML = myOrders.map(o=>{
       const paySt = o.paymentStatus || 'pendiente';
       const procSt = o.processStatus || 'en_proceso';
       return `
@@ -391,7 +346,8 @@ async function renderOpticaOrders(outlet){
         <h4 class="mb-0">Óptica: ${optica?.nombre || 'Óptica'}</h4>
         <div class="text-muted small">Stock (solo lectura) + pedidos</div>
       </div>
-      <button class="btn btn-brand" id="btnNewOrder">Nuevo pedido</button>
+      <!-- ✅ ahora manda al POS -->
+      <button class="btn btn-brand" id="btnGoPOS">Ir a POS</button>
     </div>
 
     <div class="row g-3">
@@ -461,25 +417,7 @@ async function renderOpticaOrders(outlet){
                   <th></th>
                 </tr>
               </thead>
-              <tbody>
-                ${myOrders.map(o => {
-                  const paySt = o.paymentStatus || 'pendiente';
-                  const procSt = o.processStatus || 'en_proceso';
-                  return `
-                    <tr data-process="${procSt}">
-                      <td class="fw-semibold">#${o.id}</td>
-                      <td class="small">${formatDateTime(o.date)}</td>
-                      <td>${money(o.total)}</td>
-                      <td class="small">${PM_LABEL[o.paymentMethod] || o.paymentMethod}</td>
-                      <td>${badgeHtml('payment', paySt)}</td>
-                      <td>${badgeHtml('process', procSt)}</td>
-                      <td class="text-end">
-                        <button class="btn btn-sm btn-outline-brand" data-view-order="${o.id}">Ver</button>
-                      </td>
-                    </tr>
-                  `;
-                }).join('')}
-              </tbody>
+              <tbody></tbody>
             </table>
           </div>
 
@@ -487,105 +425,12 @@ async function renderOpticaOrders(outlet){
         </div>
       </div>
     </div>
-
-    <div class="modal fade" id="orderModal" tabindex="-1" aria-hidden="true">
-      <div class="modal-dialog modal-xl modal-dialog-scrollable">
-        <div class="modal-content">
-          <div class="modal-header">
-            <h5 class="modal-title">Nuevo pedido</h5>
-            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
-          </div>
-
-          <div class="modal-body">
-            <div class="row g-3">
-              <div class="col-md-3">
-                <label class="form-label">Método de pago</label>
-                <select class="form-select" id="payMethod">
-                  ${allowed.includes('cash') ? `<option value="cash">Efectivo</option>` : ''}
-                  ${allowed.includes('transfer') ? `<option value="transfer">Transferencia</option>` : ''}
-                </select>
-                <div class="form-text">Configurado por el admin.</div>
-              </div>
-
-              <div class="col-md-5">
-                <label class="form-label">Notas</label>
-                <input class="form-control" id="notes" placeholder="Indicaciones (opcional)">
-              </div>
-
-              <div class="col-md-4">
-                <label class="form-label">Buscar producto</label>
-                <input class="form-control" id="prodSearch" placeholder="Nombre o SKU...">
-              </div>
-
-              <div class="col-md-4">
-                <label class="form-label">Filtrar por categoría</label>
-                <select class="form-select" id="filterCategory">
-                  <option value="">Todas</option>
-                  ${categories.map(c => `<option value="${c}">${c}</option>`).join('')}
-                </select>
-              </div>
-
-              <div class="col-md-4">
-                <label class="form-label">Filtrar por tipo</label>
-                <select class="form-select" id="filterType">
-                  <option value="">Todos</option>
-                  ${types.map(t => `<option value="${t}">${t}</option>`).join('')}
-                </select>
-              </div>
-
-              <div class="col-md-4 d-flex align-items-end justify-content-end">
-                <div class="fw-semibold me-2">Total:</div>
-                <div class="fw-bold" id="orderTotal">${money(0)}</div>
-              </div>
-
-              <div class="col-12">
-                <div class="table-responsive">
-                  <table class="table table-sm align-middle" id="orderProducts">
-                    <thead>
-                      <tr>
-                        <th>SKU</th>
-                        <th>Producto</th>
-                        <th>Categoría</th>
-                        <th>Tipo</th>
-                        <th>Precio</th>
-                        <th style="width:140px;">Cantidad</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      ${products.map(p => `
-                        <tr class="prod-row"
-                            data-sku="${(p.sku || '').toLowerCase()}"
-                            data-name="${(p.name || '').toLowerCase()}"
-                            data-category="${p.category || ''}"
-                            data-type="${p.type || ''}">
-                          <td>${p.sku}</td>
-                          <td>${p.name}</td>
-                          <td class="small text-muted">${p.category || ''}</td>
-                          <td class="small text-muted">${p.type || ''}</td>
-                          <td>${money(p.salePrice)}</td>
-                          <td>
-                            <input class="form-control form-control-sm qty"
-                                   type="number" min="0" value="0"
-                                   data-pid="${p.id}" data-price="${p.salePrice}">
-                          </td>
-                        </tr>
-                      `).join('')}
-                    </tbody>
-                  </table>
-                </div>
-                <div class="small text-muted">Puedes buscar por nombre o SKU, y filtrar por categoría/tipo.</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="modal-footer">
-            <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
-            <button class="btn btn-brand" id="btnSendOrder">Enviar pedido</button>
-          </div>
-        </div>
-      </div>
-    </div>
   `;
+
+  // ✅ botón -> POS
+  outlet.querySelector('#btnGoPOS')?.addEventListener('click', ()=>{
+    location.hash = '#/pos';
+  });
 
   // DataTables stock
   if (window.$ && $.fn.dataTable) {
@@ -605,6 +450,8 @@ async function renderOpticaOrders(outlet){
     });
   }
 
+  renderMyOrdersTbody();
+
   // filtros pedidos anteriores
   const applyOrderFilter = () => {
     const q = (document.getElementById('orderSearch').value || '').toLowerCase().trim();
@@ -622,120 +469,15 @@ async function renderOpticaOrders(outlet){
   document.getElementById('orderSearch').addEventListener('input', applyOrderFilter);
   document.getElementById('orderProcess').addEventListener('change', applyOrderFilter);
 
-  // modal
-  const modal = new bootstrap.Modal(document.getElementById('orderModal'));
-
-  outlet.querySelector('#btnNewOrder').addEventListener('click', () => {
-    modal.show();
-    applyProductFilter();
-  });
-
-  const calcTotal = () => {
-    const qtyInputs = Array.from(document.querySelectorAll('#orderProducts .qty'));
-    let total = 0;
-
-    for (const inp of qtyInputs) {
-      const q = Number(inp.value || 0);
-      const price = Number(inp.dataset.price || 0);
-      total += q * price;
-    }
-
-    document.getElementById('orderTotal').textContent = money(total);
-    return total;
-  };
-
-  const applyProductFilter = () => {
-    const s = (document.getElementById('prodSearch').value || '').toLowerCase().trim();
-    const c = document.getElementById('filterCategory').value;
-    const t = document.getElementById('filterType').value;
-
-    const rows = Array.from(document.querySelectorAll('#orderProducts tbody tr.prod-row'));
-    rows.forEach(r => {
-      const sku = r.dataset.sku || '';
-      const name = r.dataset.name || '';
-      const rc = r.dataset.category || '';
-      const rt = r.dataset.type || '';
-      const okS = !s || sku.includes(s) || name.includes(s);
-      const okC = !c || rc === c;
-      const okT = !t || rt === t;
-      r.style.display = (okS && okC && okT) ? '' : 'none';
-    });
-  };
-
-  document.getElementById('prodSearch').addEventListener('input', applyProductFilter);
-  document.getElementById('filterCategory').addEventListener('change', applyProductFilter);
-  document.getElementById('filterType').addEventListener('change', applyProductFilter);
-
-  document.addEventListener('input', (e) => {
-    if (e.target && e.target.matches('#orderProducts .qty')) calcTotal();
-  });
-
-  // crear pedido
-  document.getElementById('btnSendOrder').addEventListener('click', async () => {
-    const qtyInputs = Array.from(document.querySelectorAll('#orderProducts .qty'));
-    const items = qtyInputs
-      .map(inp => ({
-        productId: Number(inp.dataset.pid),
-        qty: Number(inp.value || 0),
-        price: Number(inp.dataset.price || 0)
-      }))
-      .filter(it => it.qty > 0);
-
-    if (items.length === 0) {
-      Swal.fire('Sin productos', 'Agrega al menos un producto.', 'info');
-      return;
-    }
-
-    const total = items.reduce((a, it) => a + it.qty * it.price, 0);
-    const paymentMethod = document.getElementById('payMethod').value;
-    const notes = document.getElementById('notes').value;
-
-    const confirm = await Swal.fire({
-      title: 'Confirmar pedido',
-      html: `Óptica: <b>${safe(optica?.nombre || 'Óptica')}</b><br/>
-             Pago (método): <b>${safe(PM_LABEL[paymentMethod] || paymentMethod)}</b><br/>
-             Estatus pago: <b>Pendiente</b><br/>
-             Estatus proceso: <b>En proceso</b><br/>
-             Total: <b>${money(total)}</b>`,
-      icon: 'question',
-      showCancelButton: true,
-      confirmButtonText: 'Enviar'
-    });
-
-    if (!confirm.isConfirmed) return;
-
-    const u = authService.getUser() || {};
-    await ordersService.create({
-      opticaId,
-      date: new Date().toISOString(),
-      items,
-      total,
-      paymentMethod,
-
-      paymentStatus: 'pendiente',
-      processStatus: 'en_proceso',
-
-      notes,
-      createdByRole: authService.getRole(),
-      createdByName: u.name || u.nombre || '',
-      createdByEmail: u.email || ''
-    });
-
-    modal.hide();
-    Swal.fire('Enviado', 'Pedido registrado (mock).', 'success');
-  });
-
-  // ver detalle (óptica solo ve, no cambia)
+  // ver detalle (óptica solo ve)
   outlet.addEventListener('click', async (e)=>{
     const id = e.target?.dataset?.viewOrder;
     if(!id) return;
     const o = myOrders.find(x=>String(x.id)===String(id));
     if(!o) return;
-    await showOrderDetail(o, productsMap, opticasById, { role: 'optica', onLocalUpdate });
+    await showOrderDetail(o, productsMap, opticasById, { role: 'optica' });
   });
 
-  calcTotal();
-  applyProductFilter();
   applyOrderFilter();
 }
 
@@ -749,18 +491,15 @@ async function renderEmployeeOrders(outlet){
   const productsMap = buildProductMap(products);
 
   const allOrdersRaw = (await ordersService.list()) || [];
-  const allOrders = allOrdersRaw.map(normalizeOrder);
+  const rows = allOrdersRaw.map(normalizeOrder).sort((a,b)=> new Date(b.date) - new Date(a.date));
 
   const opticas = await loadOpticasDb();
   const opticasById = new Map((opticas || []).map(o => [String(o.id), o]));
-
-  const rows = allOrders.slice().sort((a,b)=> new Date(b.date) - new Date(a.date));
 
   const onLocalUpdate = (orderId, patch)=>{
     const idx = rows.findIndex(x=>String(x.id)===String(orderId));
     if(idx >= 0) rows[idx] = normalizeOrder({ ...rows[idx], ...patch });
 
-    // refresca SOLO la fila visualmente: aquí hacemos re-render completo del tbody (simple y seguro)
     const tbody = outlet.querySelector('#tblAllOrders tbody');
     if(!tbody) return;
 
@@ -768,7 +507,6 @@ async function renderEmployeeOrders(outlet){
       const optName = opticasById.get(String(o.opticaId))?.nombre || `Óptica #${o.opticaId || '—'}`;
       const created = (o.createdByName || o.createdByEmail || '—');
       const createdRole = (o.createdByRole || '—');
-
       const paySt = o.paymentStatus || 'pendiente';
       const procSt = o.processStatus || 'en_proceso';
 
@@ -819,7 +557,6 @@ async function renderEmployeeOrders(outlet){
               const optName = opticasById.get(String(o.opticaId))?.nombre || `Óptica #${o.opticaId || '—'}`;
               const created = (o.createdByName || o.createdByEmail || '—');
               const createdRole = (o.createdByRole || '—');
-
               const paySt = o.paymentStatus || 'pendiente';
               const procSt = o.processStatus || 'en_proceso';
 
@@ -849,7 +586,6 @@ async function renderEmployeeOrders(outlet){
     </div>
   `;
 
-  // DataTables
   if(window.$ && $.fn.dataTable){
     if($.fn.DataTable.isDataTable('#tblAllOrders')){
       $('#tblAllOrders').DataTable().destroy();
@@ -867,14 +603,11 @@ async function renderEmployeeOrders(outlet){
     });
   }
 
-  // Detalle + edición controlada
   outlet.addEventListener('click', async (e)=>{
     const id = e.target?.dataset?.viewOrder;
     if(!id) return;
-
     const o = rows.find(x=>String(x.id)===String(id));
     if(!o) return;
-
     await showOrderDetail(o, productsMap, opticasById, { role, onLocalUpdate });
   });
 }

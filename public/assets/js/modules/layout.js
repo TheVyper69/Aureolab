@@ -5,7 +5,7 @@ export function renderLayout(){
   const user = authService.getUser() || { name: 'Usuario' };
 
   const links = [
-    { hash: '#/pos',       label: 'Punto de Venta',    roles: ['admin','employee','optica'] },
+    { hash: '#/pos',       label: 'Catálogo',    roles: ['admin','employee','optica'] },
     { hash: '#/inventory', label: 'Inventario',        roles: ['admin','employee'] },
     { hash: '#/sales',     label: 'Ventas / Reportes', roles: ['admin'] },
     { hash: '#/users',     label: 'Usuarios',          roles: ['admin'] },

@@ -100,7 +100,7 @@ export async function renderPOS(outlet){
 
   outlet.innerHTML = `
     <div class="d-flex align-items-center justify-content-between mb-3">
-      <h4 class="mb-0">Punto de Venta</h4>
+      <h4 class="mb-0">Catálogo</h4>
     </div>
 
     <div class="card p-3 mb-3">
