@@ -1,40 +1,84 @@
+import { api } from './api.js';
+
 class AuthService {
-  getToken(){ return localStorage.getItem('authToken'); }
-  getRole(){ return localStorage.getItem('userRole'); } // 'admin' | 'employee'
-  getUser(){ return JSON.parse(localStorage.getItem('userData') || 'null'); }
-
-  async login({ email, password }){
-    // Mock:
-    // - email contiene "admin" => admin
-    // - email contiene "optica" => optica
-    // - si no => employee
-    const token = 'mock-jwt-token';
-    const em = String(email||'').toLowerCase();
-    let role = 'employee';
-    if(em.includes('admin')) role = 'admin';
-    else if(em.includes('optica')) role = 'optica';
-
-    localStorage.setItem('authToken', token);
-    localStorage.setItem('userRole', role);
-
-    const displayName = role === 'admin' ? 'Admin' : (role === 'optica' ? 'Óptica' : 'Empleado');
-    localStorage.setItem('userData', JSON.stringify({ name: displayName, email }));
-
-    if (role === 'optica') location.hash = '#/orders';
-    else location.hash = '#/pos';
-
-    return { ok:true, role };
+  constructor() {
+    this.TOKEN_KEY = 'auth_token';
+    this.USER_KEY = 'auth_user';
   }
 
-  async register({ name, email, password }){
-    // Fase 1 (mock): permite crear admin
-    return { ok:true };
+  getToken() {
+    return localStorage.getItem(this.TOKEN_KEY);
   }
 
-  logout(){
-    localStorage.removeItem('authToken');
-    localStorage.removeItem('userRole');
-    localStorage.removeItem('userData');
+  setToken(token) {
+    localStorage.setItem(this.TOKEN_KEY, token);
+  }
+
+  getUser() {
+    try {
+      return JSON.parse(localStorage.getItem(this.USER_KEY) || 'null');
+    } catch {
+      return null;
+    }
+  }
+
+  setUser(user) {
+    localStorage.setItem(this.USER_KEY, JSON.stringify(user || null));
+  }
+
+  // ✅ Normaliza rol para tu front (admin/employee/optica)
+  getRole() {
+    const u = this.getUser();
+
+    // Si backend ya manda role directo
+    const roleName =
+      u?.role?.name ||
+      u?.role_name ||
+      u?.roleName ||
+      null;
+
+    if (roleName) return String(roleName).toLowerCase();
+
+    // Fallback: si solo manda role_id
+    const roleId = Number(u?.role_id ?? u?.roleId ?? 0);
+    if (roleId === 1) return 'admin';
+    if (roleId === 2) return 'employee';
+    if (roleId === 3) return 'optica';
+
+    return null;
+  }
+
+  async login({ email, password }) {
+    // ✅ Laravel Sanctum (token-based) - POST /api/auth/login
+    const res = await api.post('/auth/login', { email, password });
+
+    const token = res?.data?.token;
+    const user = res?.data?.user;
+
+    if (!token || !user) {
+      throw new Error('Respuesta inválida del servidor (token/user).');
+    }
+
+    this.setToken(token);
+    this.setUser(user);
+
+    return res.data;
+  }
+
+  async logout() {
+    try {
+      // si tienes endpoint de logout en backend
+      await api.post('/auth/logout', {});
+    } catch (e) {
+      // no pasa nada si falla
+    }
+    localStorage.removeItem(this.TOKEN_KEY);
+    localStorage.removeItem(this.USER_KEY);
+  }
+
+  isLoggedIn() {
+    return !!this.getToken();
   }
 }
+
 export const authService = new AuthService();

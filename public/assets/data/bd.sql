@@ -1,13 +1,71 @@
+CREATE DATABASE IF NOT EXISTS aureolab
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+
+USE aureolab;
+
+SET FOREIGN_KEY_CHECKS=0;
+
+-- ============================================================
+-- Limpieza opcional (si quieres reinstalar todo de cero)
+-- (Descomenta si aplica)
+-- ============================================================
+-- DROP TABLE IF EXISTS order_status_logs;
+-- DROP TABLE IF EXISTS order_items;
+-- DROP TABLE IF EXISTS orders;
+-- DROP TABLE IF EXISTS sale_items;
+-- DROP TABLE IF EXISTS sales;
+-- DROP TABLE IF EXISTS customers;
+-- DROP TABLE IF EXISTS inventory_movements;
+-- DROP TABLE IF EXISTS inventory_variants;
+-- DROP TABLE IF EXISTS inventory;
+-- DROP TABLE IF EXISTS product_variants;
+-- DROP TABLE IF EXISTS products;
+-- DROP TABLE IF EXISTS suppliers;
+-- DROP TABLE IF EXISTS users;
+-- DROP TABLE IF EXISTS optica_payment_methods;
+-- DROP TABLE IF EXISTS opticas;
+-- DROP TABLE IF EXISTS categories;
+-- DROP TABLE IF EXISTS payment_methods;
+-- DROP TABLE IF EXISTS roles;
+-- DROP TABLE IF EXISTS personal_access_tokens;
+-- DROP TABLE IF EXISTS migrations;
+
+-- ============================================================
+-- Laravel base (por si ya usas Sanctum / etc.)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS migrations (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  migration VARCHAR(255) NOT NULL,
+  batch INT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS personal_access_tokens (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tokenable_type VARCHAR(255) NOT NULL,
+  tokenable_id BIGINT UNSIGNED NOT NULL,
+  name TEXT NOT NULL,
+  token VARCHAR(64) NOT NULL,
+  abilities TEXT NULL,
+  last_used_at TIMESTAMP NULL,
+  expires_at TIMESTAMP NULL,
+  created_at TIMESTAMP NULL,
+  updated_at TIMESTAMP NULL,
+  UNIQUE KEY personal_access_tokens_token_unique (token),
+  KEY personal_access_tokens_tokenable_type_tokenable_id_index (tokenable_type, tokenable_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
 -- Helper: crear índice si no existe (MySQL compatible)
--- Uso: SET @table='products'; SET @index='idx_products_category'; SET @cols='(category_id)'; CALL sp_create_index_if_not_exists();
 -- ============================================================
+
 DROP PROCEDURE IF EXISTS sp_create_index_if_not_exists;
 DELIMITER $$
 CREATE PROCEDURE sp_create_index_if_not_exists()
 BEGIN
   DECLARE idx_count INT DEFAULT 0;
+
   SELECT COUNT(1) INTO idx_count
   FROM information_schema.statistics
   WHERE table_schema = DATABASE()
@@ -28,25 +86,25 @@ DELIMITER ;
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS roles (
-  id TINYINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   name VARCHAR(32) NOT NULL UNIQUE,
   created_at TIMESTAMP NULL DEFAULT NULL,
   updated_at TIMESTAMP NULL DEFAULT NULL,
   deleted_at TIMESTAMP NULL DEFAULT NULL
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 INSERT INTO roles (name, created_at, updated_at)
 VALUES ('admin', NOW(), NOW()), ('employee', NOW(), NOW()), ('optica', NOW(), NOW())
 ON DUPLICATE KEY UPDATE name = VALUES(name), updated_at = NOW();
 
 CREATE TABLE IF NOT EXISTS payment_methods (
-  id TINYINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   code VARCHAR(20) NOT NULL UNIQUE,  -- cash, transfer, card
   label VARCHAR(60) NOT NULL,
   created_at TIMESTAMP NULL DEFAULT NULL,
   updated_at TIMESTAMP NULL DEFAULT NULL,
   deleted_at TIMESTAMP NULL DEFAULT NULL
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 INSERT INTO payment_methods (code, label, created_at, updated_at) VALUES
 ('cash','Efectivo', NOW(), NOW()),
@@ -59,14 +117,14 @@ ON DUPLICATE KEY UPDATE label = VALUES(label), updated_at = NOW();
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS categories (
-  id SMALLINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   code VARCHAR(40) NOT NULL UNIQUE,  -- MICAS, LENTES_CONTACTO, ARMAZONES, ACCESORIOS, BISEL
   name VARCHAR(80) NOT NULL,
   description TEXT NULL,
   created_at TIMESTAMP NULL DEFAULT NULL,
   updated_at TIMESTAMP NULL DEFAULT NULL,
   deleted_at TIMESTAMP NULL DEFAULT NULL
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 INSERT INTO categories (code, name, created_at, updated_at) VALUES
 ('MICAS','Micas', NOW(), NOW()),
@@ -82,38 +140,44 @@ ON DUPLICATE KEY UPDATE name = VALUES(name), updated_at = NOW();
 
 CREATE TABLE IF NOT EXISTS opticas (
   id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
-
   nombre VARCHAR(160) NOT NULL,
   contacto VARCHAR(160) NULL,
   telefono VARCHAR(40) NULL,
   email VARCHAR(190) NULL,
-
   active TINYINT(1) NOT NULL DEFAULT 1,
-
   created_at TIMESTAMP NULL DEFAULT NULL,
   updated_at TIMESTAMP NULL DEFAULT NULL,
   deleted_at TIMESTAMP NULL DEFAULT NULL,
-
   INDEX idx_opticas_email (email),
   INDEX idx_opticas_active (active)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS optica_payment_methods (
+  optica_id BIGINT UNSIGNED NOT NULL,
+  payment_method_id BIGINT UNSIGNED NOT NULL,
+  created_at TIMESTAMP NULL DEFAULT NULL,
+  updated_at TIMESTAMP NULL DEFAULT NULL,
+  deleted_at TIMESTAMP NULL DEFAULT NULL,
+  PRIMARY KEY (optica_id, payment_method_id),
+  CONSTRAINT fk_opm_optica FOREIGN KEY (optica_id) REFERENCES opticas(id) ON DELETE CASCADE,
+  CONSTRAINT fk_opm_pm FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
 -- 3) USUARIOS (Laravel-ready)
+-- ✅ FK users.optica_id definido AQUÍ (sin ALTER después)
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS users (
   id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
-  role_id TINYINT UNSIGNED NOT NULL,
-
-  -- Para usuarios tipo óptica (login), se liga opcionalmente aquí:
+  role_id BIGINT UNSIGNED NOT NULL,
   optica_id BIGINT UNSIGNED NULL,
 
   name VARCHAR(120) NOT NULL,
   email VARCHAR(190) NOT NULL UNIQUE,
   phone VARCHAR(40) NULL,
 
-  password VARCHAR(255) NOT NULL,      -- Laravel "password"
+  password VARCHAR(255) NOT NULL,
   remember_token VARCHAR(100) NULL,
   email_verified_at TIMESTAMP NULL,
 
@@ -124,28 +188,13 @@ CREATE TABLE IF NOT EXISTS users (
   deleted_at TIMESTAMP NULL DEFAULT NULL,
 
   CONSTRAINT fk_users_role FOREIGN KEY (role_id) REFERENCES roles(id),
+  CONSTRAINT fk_users_optica FOREIGN KEY (optica_id) REFERENCES opticas(id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE,
+
   INDEX idx_users_role (role_id),
   INDEX idx_users_optica (optica_id)
-) ENGINE=InnoDB;
-
-ALTER TABLE users
-  ADD CONSTRAINT fk_users_optica
-  FOREIGN KEY (optica_id) REFERENCES opticas(id)
-  ON DELETE SET NULL
-  ON UPDATE CASCADE;
-
-CREATE TABLE IF NOT EXISTS optica_payment_methods (
-  optica_id BIGINT UNSIGNED NOT NULL,
-  payment_method_id TINYINT UNSIGNED NOT NULL,
-
-  created_at TIMESTAMP NULL DEFAULT NULL,
-  updated_at TIMESTAMP NULL DEFAULT NULL,
-  deleted_at TIMESTAMP NULL DEFAULT NULL,
-
-  PRIMARY KEY (optica_id, payment_method_id),
-  CONSTRAINT fk_opm_optica FOREIGN KEY (optica_id) REFERENCES opticas(id) ON DELETE CASCADE,
-  CONSTRAINT fk_opm_pm FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) ON DELETE RESTRICT
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
 -- 4) PROVEEDORES
@@ -158,19 +207,15 @@ CREATE TABLE IF NOT EXISTS suppliers (
   email VARCHAR(190) NULL,
   notes TEXT NULL,
   active TINYINT(1) NOT NULL DEFAULT 1,
-
   created_at TIMESTAMP NULL DEFAULT NULL,
   updated_at TIMESTAMP NULL DEFAULT NULL,
   deleted_at TIMESTAMP NULL DEFAULT NULL,
-
   INDEX idx_suppliers_name (name),
   INDEX idx_suppliers_active (active)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
 -- 5) PRODUCTOS
--- - Imagen guardada en BD
--- - Descripción
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS products (
@@ -180,16 +225,14 @@ CREATE TABLE IF NOT EXISTS products (
   name VARCHAR(220) NOT NULL,
   description TEXT NULL,
 
-  category_id SMALLINT UNSIGNED NOT NULL,
+  category_id BIGINT UNSIGNED NOT NULL,
 
-  -- Clasificadores generales
   type VARCHAR(60) NULL,
   brand VARCHAR(90) NULL,
   model VARCHAR(90) NULL,
   material VARCHAR(90) NULL,
   size VARCHAR(40) NULL,
 
-  -- Precios/stock objetivo
   buy_price DECIMAL(12,2) NOT NULL DEFAULT 0,
   sale_price DECIMAL(12,2) NOT NULL DEFAULT 0,
   min_stock INT NOT NULL DEFAULT 0,
@@ -197,7 +240,6 @@ CREATE TABLE IF NOT EXISTS products (
 
   supplier_id BIGINT UNSIGNED NULL,
 
-  -- Imagen en BD
   image_filename VARCHAR(190) NULL,
   image_mime VARCHAR(80) NULL,
   image_blob LONGBLOB NULL,
@@ -214,12 +256,10 @@ CREATE TABLE IF NOT EXISTS products (
   INDEX idx_products_category (category_id),
   INDEX idx_products_name (name),
   INDEX idx_products_active (active)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
--- 6) VARIANTES (graduación) ✅ recomendado
--- - MICAS y LENTES_CONTACTO: sph/cyl/add (SIN eje)
--- - BISEL no usa variantes (axis va en item)
+-- 6) VARIANTES (graduación) SIN eje
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS product_variants (
@@ -228,12 +268,10 @@ CREATE TABLE IF NOT EXISTS product_variants (
 
   variant_type ENUM('micas','contacto') NOT NULL,
 
-  -- Graduación SIN eje
   sph DECIMAL(6,2) NULL,
   cyl DECIMAL(6,2) NULL,
   add_power DECIMAL(6,2) NULL,
 
-  -- Contacto
   bc DECIMAL(6,2) NULL,
   dia DECIMAL(6,2) NULL,
   color VARCHAR(40) NULL,
@@ -249,11 +287,10 @@ CREATE TABLE IF NOT EXISTS product_variants (
   INDEX idx_variants_product (product_id),
   INDEX idx_variants_type (variant_type),
   INDEX idx_variants_graduation (sph, cyl, add_power)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
 -- 7) INVENTARIO
--- 7.1 Por producto
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS inventory (
@@ -268,9 +305,8 @@ CREATE TABLE IF NOT EXISTS inventory (
 
   CONSTRAINT fk_inventory_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
   INDEX idx_inventory_stock (stock)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 7.2 Por variante
 CREATE TABLE IF NOT EXISTS inventory_variants (
   id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   variant_id BIGINT UNSIGNED NOT NULL UNIQUE,
@@ -284,9 +320,8 @@ CREATE TABLE IF NOT EXISTS inventory_variants (
 
   CONSTRAINT fk_inv_variants_variant FOREIGN KEY (variant_id) REFERENCES product_variants(id) ON DELETE CASCADE,
   INDEX idx_inventory_variants_stock (stock)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Movimientos (auditoría)
 CREATE TABLE IF NOT EXISTS inventory_movements (
   id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
 
@@ -313,7 +348,7 @@ CREATE TABLE IF NOT EXISTS inventory_movements (
   INDEX idx_im_product (product_id),
   INDEX idx_im_variant (variant_id),
   INDEX idx_im_created_at (created_at)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
 -- 8) CLIENTES (POS)
@@ -332,23 +367,21 @@ CREATE TABLE IF NOT EXISTS customers (
 
   INDEX idx_customers_name (name),
   INDEX idx_customers_email (email)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
--- 9) VENTAS POS
--- - Descuento por pedido o por producto
+-- 9) VENTAS POS (descuento global + por item)
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS sales (
   id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
-  sold_by BIGINT UNSIGNED NULL,                 -- admin/employee/optica (si aplica)
+  sold_by BIGINT UNSIGNED NULL,
 
   customer_id BIGINT UNSIGNED NULL,
-  customer_name VARCHAR(160) NULL,              -- quick customer
+  customer_name VARCHAR(160) NULL,
 
-  payment_method_id TINYINT UNSIGNED NOT NULL,  -- cash/card/transfer
+  payment_method_id BIGINT UNSIGNED NOT NULL,
 
-  -- Descuento global
   discount_type ENUM('none','order_pct','order_amount') NOT NULL DEFAULT 'none',
   discount_value DECIMAL(12,2) NOT NULL DEFAULT 0.00,
 
@@ -368,29 +401,27 @@ CREATE TABLE IF NOT EXISTS sales (
 
   INDEX idx_sales_created_at (created_at),
   INDEX idx_sales_sold_by (sold_by)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS sale_items (
   id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   sale_id BIGINT UNSIGNED NOT NULL,
 
   product_id BIGINT UNSIGNED NOT NULL,
-  variant_id BIGINT UNSIGNED NULL,              -- si vendes por graduación
+  variant_id BIGINT UNSIGNED NULL,
 
   qty INT NOT NULL,
 
   unit_price DECIMAL(12,2) NOT NULL,
   line_subtotal DECIMAL(12,2) NOT NULL DEFAULT 0,
 
-  -- Descuento por producto
   item_discount_type ENUM('none','pct','amount') NOT NULL DEFAULT 'none',
   item_discount_value DECIMAL(12,2) NOT NULL DEFAULT 0,
   item_discount_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
 
   line_total DECIMAL(12,2) NOT NULL,
 
-  -- BISEL: eje se captura en item
-  axis SMALLINT NULL,
+  axis SMALLINT NULL,     -- solo BISEL
   item_notes TEXT NULL,
 
   created_at TIMESTAMP NULL DEFAULT NULL,
@@ -404,19 +435,19 @@ CREATE TABLE IF NOT EXISTS sale_items (
   INDEX idx_sale_items_sale (sale_id),
   INDEX idx_sale_items_product (product_id),
   INDEX idx_sale_items_variant (variant_id)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
--- 10) PEDIDOS (UNIFICADOS) — Ópticas y/o internos
+-- 10) PEDIDOS (unificados)
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS orders (
   id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
 
-  optica_id BIGINT UNSIGNED NULL,               -- null si es pedido interno
-  created_by_user_id BIGINT UNSIGNED NULL,      -- admin/employee/optica
+  optica_id BIGINT UNSIGNED NULL,
+  created_by_user_id BIGINT UNSIGNED NULL,
 
-  payment_method_id TINYINT UNSIGNED NOT NULL,  -- cash/transfer
+  payment_method_id BIGINT UNSIGNED NOT NULL,
 
   payment_status ENUM('pendiente','pagado') NOT NULL DEFAULT 'pendiente',
   process_status ENUM('en_proceso','listo_para_entregar','entregado','revision') NOT NULL DEFAULT 'en_proceso',
@@ -438,21 +469,20 @@ CREATE TABLE IF NOT EXISTS orders (
   INDEX idx_orders_optica (optica_id),
   INDEX idx_orders_payment_status (payment_status),
   INDEX idx_orders_process_status (process_status)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS order_items (
   id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   order_id BIGINT UNSIGNED NOT NULL,
 
   product_id BIGINT UNSIGNED NOT NULL,
-  variant_id BIGINT UNSIGNED NULL,              -- si el pedido es por graduación
+  variant_id BIGINT UNSIGNED NULL,
 
   qty INT NOT NULL,
   unit_price DECIMAL(12,2) NOT NULL,
   line_total DECIMAL(12,2) NOT NULL,
 
-  -- BISEL: eje se captura en item
-  axis SMALLINT NULL,
+  axis SMALLINT NULL,    -- solo BISEL
   item_notes TEXT NULL,
 
   created_at TIMESTAMP NULL DEFAULT NULL,
@@ -466,9 +496,8 @@ CREATE TABLE IF NOT EXISTS order_items (
   INDEX idx_order_items_order (order_id),
   INDEX idx_order_items_product (product_id),
   INDEX idx_order_items_variant (variant_id)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Auditoría de cambios de estatus
 CREATE TABLE IF NOT EXISTS order_status_logs (
   id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   order_id BIGINT UNSIGNED NOT NULL,
@@ -491,32 +520,28 @@ CREATE TABLE IF NOT EXISTS order_status_logs (
 
   INDEX idx_osl_order (order_id),
   INDEX idx_osl_created_at (created_at)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
 -- 11) ÍNDICES EXTRA (idempotentes)
 -- ============================================================
 
--- products(category_id)
 SET @table='products'; SET @index='idx_products_category_extra'; SET @cols='(category_id)';
 CALL sp_create_index_if_not_exists();
 
--- products(supplier_id)
 SET @table='products'; SET @index='idx_products_supplier_extra'; SET @cols='(supplier_id)';
 CALL sp_create_index_if_not_exists();
 
--- inventory(stock)
 SET @table='inventory'; SET @index='idx_inventory_stock_extra'; SET @cols='(stock)';
 CALL sp_create_index_if_not_exists();
 
--- inventory_variants(stock)
 SET @table='inventory_variants'; SET @index='idx_inventory_variants_stock_extra'; SET @cols='(stock)';
 CALL sp_create_index_if_not_exists();
 
--- orders(process_status, payment_status)
 SET @table='orders'; SET @index='idx_orders_status_combo'; SET @cols='(process_status, payment_status)';
 CALL sp_create_index_if_not_exists();
 
--- sales(created_at)
 SET @table='sales'; SET @index='idx_sales_created_at_extra'; SET @cols='(created_at)';
 CALL sp_create_index_if_not_exists();
+
+SET FOREIGN_KEY_CHECKS=1;

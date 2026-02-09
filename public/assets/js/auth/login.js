@@ -1,7 +1,7 @@
 import { authService } from '../services/authService.js';
 import { required, isEmail } from '../utils/validators.js';
 
-export function renderLogin(root) {
+export function renderLogin(root){
   root.innerHTML = `
   <div class="auth-wrap">
     <div class="card auth-card">
@@ -24,45 +24,55 @@ export function renderLogin(root) {
             <div class="invalid-feedback">La contraseña es obligatoria.</div>
           </div>
 
-          <button class="btn btn-brand w-100" type="submit">Entrar</button>
-
-          <div class="mt-3 small text-muted">
-            Mock: si tu correo contiene <b>admin</b> entrarás como admin. Si contiene <b>optica</b>, entrarás como óptica.
-          </div>
-
-          <div class="mt-3 text-center">
-            <a href="#/register" class="text-decoration-none">Crear cuenta (admin)</a>
-          </div>
+          <button class="btn btn-brand w-100" type="submit" id="btnLogin">
+            Entrar
+          </button>
         </form>
       </div>
     </div>
   </div>
   `;
 
-  // ✅ IMPORTANTE: usa root.querySelector para no “perder” elementos en SPA
-  const form = root.querySelector('#loginForm');
+  const form = document.getElementById('loginForm');
+  const btn = document.getElementById('btnLogin');
 
-  form.addEventListener('submit', async (e) => {
+  form.addEventListener('submit', async (e)=>{
     e.preventDefault();
 
-    const email = root.querySelector('#email');
-    const password = root.querySelector('#password');
+    const emailEl = document.getElementById('email');
+    const passEl = document.getElementById('password');
 
-    const emailOk = required(email.value) && isEmail(email.value);
-    const passOk = required(password.value);
+    const email = emailEl.value.trim();
+    const password = passEl.value;
 
-    email.classList.toggle('is-invalid', !emailOk);
-    password.classList.toggle('is-invalid', !passOk);
-    if (!emailOk || !passOk) return;
+    const emailOk = required(email) && isEmail(email);
+    const passOk = required(password);
 
-    try {
-      await authService.login({ email: email.value, password: password.value });
+    emailEl.classList.toggle('is-invalid', !emailOk);
+    passEl.classList.toggle('is-invalid', !passOk);
+    if(!emailOk || !passOk) return;
+
+    try{
+      btn.disabled = true;
+      btn.textContent = 'Entrando...';
+
+      await authService.login({ email, password });
 
       // ✅ Redirección por rol
       const role = authService.getRole();
-      location.hash = role === 'optica' ? '#/orders' : '#/pos';
-    } catch (err) {
-      Swal.fire('Error', 'No se pudo iniciar sesión.', 'error');
+      if(role === 'optica') location.hash = '#/orders';     // o '#/pos' si quieres que entren al POS directo
+      else if(role === 'employee') location.hash = '#/pos';
+      else location.hash = '#/pos'; // admin
+    }catch(err){
+      const msg =
+        err?.response?.data?.message ||
+        err?.response?.data?.error ||
+        err?.message ||
+        'No se pudo iniciar sesión.';
+      Swal.fire('Error', msg, 'error');
+    }finally{
+      btn.disabled = false;
+      btn.textContent = 'Entrar';
     }
   });
 }

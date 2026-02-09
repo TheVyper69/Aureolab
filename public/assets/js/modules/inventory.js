@@ -20,7 +20,6 @@ function loadCategories(){
 }
 
 function saveCategories(extraCategories){
-  // solo guardamos las que NO son base
   const cleaned = (extraCategories || [])
     .map(s=>String(s||'').trim())
     .filter(Boolean);
@@ -37,9 +36,81 @@ function safe(v){
     .replaceAll('"','&quot;');
 }
 
+/**
+ * ✅ Normaliza rows para soportar:
+ * A) Backend real: [{ id, sku, name, category, sale_price, buy_price, stock, ... }]
+ * B) Mock viejo:   [{ stock, product:{...} }]
+ */
+function normalizeRows(rows){
+  const arr = Array.isArray(rows) ? rows : [];
+
+  // Si detectamos formato plano (backend)
+  const looksFlat = arr.length && (
+    'sku' in arr[0] || 'sale_price' in arr[0] || 'category' in arr[0]
+  );
+
+  if(looksFlat){
+    return arr.map(p => {
+      const categoryRaw = p.category ?? '';
+      // tu API trae: "Micas", "Lentes de Contacto", "Bisel (servicio)"
+      // Para tu UI de reglas usamos también el "code" (MICAS etc.) si te lo mandan, si no, dejamos el label.
+      return {
+        stock: Number(p.stock ?? 0),
+        product: {
+          id: p.id,
+          sku: p.sku ?? '',
+          name: p.name ?? '',
+          category: categoryRaw ?? '',
+          description: p.description ?? '',
+          type: p.type ?? '',
+          supplier: p.supplier ?? '',
+          minStock: Number(p.min_stock ?? 0),
+          maxStock: p.max_stock ?? null,
+          buyPrice: Number(p.buy_price ?? 0),
+          salePrice: Number(p.sale_price ?? 0),
+
+          // compat para imagen/graduaciones si luego las mandas
+          imageUrl: p.image_url ?? null,
+          imageBase64: p.image ?? null,
+          graduation: p.graduation ?? null,
+          bisel: p.bisel ?? null,
+          variants: Array.isArray(p.variants) ? p.variants : []
+        }
+      };
+    });
+  }
+
+  // Formato mock antiguo
+  return arr.map(r=>{
+    const p = r.product || {};
+    return {
+      stock: Number(r.stock ?? 0),
+      product: {
+        id: p.id,
+        sku: p.sku ?? '',
+        name: p.name ?? '',
+        category: p.category ?? '',
+        description: p.description ?? '',
+        type: p.type ?? '',
+        supplier: p.supplier ?? '',
+        minStock: Number(p.minStock ?? p.min_stock ?? 0),
+        maxStock: p.maxStock ?? p.max_stock ?? null,
+        buyPrice: Number(p.buyPrice ?? p.buy_price ?? 0),
+        salePrice: Number(p.salePrice ?? p.sale_price ?? 0),
+        imageUrl: p.imageUrl ?? p.image_url ?? null,
+        imageBase64: p.imageBase64 ?? null,
+        graduation: p.graduation ?? null,
+        bisel: p.bisel ?? null,
+        variants: Array.isArray(p.variants) ? p.variants : []
+      }
+    };
+  });
+}
+
 export async function renderInventory(outlet){
   const role = authService.getRole();
-  const rows = await inventoryService.list();
+  const rawRows = await inventoryService.list();
+  const rows = normalizeRows(rawRows);
   const canEdit = role === 'admin';
 
   let categories = loadCategories();
@@ -75,17 +146,17 @@ export async function renderInventory(outlet){
           <tbody>
             ${rows.map(r=>{
               const p = r.product || {};
-              const low = (r.stock <= (p.minStock ?? 0));
+              const low = (Number(r.stock ?? 0) <= Number(p.minStock ?? 0));
               return `
-                <tr>
+                <tr class="${low ? 'table-warning' : ''}">
                   <td>${safe(p.sku ?? '')}</td>
                   <td>
                     ${safe(p.name ?? '')}
-                    ${low ? '<span class="badge text-bg-warning ms-2">Bajo</span>' : ''}
+                    ${low ? '<span class="badge text-bg-danger ms-2">Crítico</span>' : ''}
                   </td>
                   <td>${safe(p.category ?? '')}</td>
-                  <td>${r.stock ?? 0}</td>
-                  <td>${p.minStock ?? ''}</td>
+                  <td class="fw-semibold">${Number(r.stock ?? 0)}</td>
+                  <td>${Number(p.minStock ?? 0)}</td>
                   <td>${p.maxStock ?? ''}</td>
                   <td>${money(p.salePrice ?? 0)}</td>
                   <td>${safe(p.supplier ?? '')}</td>
@@ -104,8 +175,8 @@ export async function renderInventory(outlet){
       <div class="small text-muted mt-2">
         ${
           canEdit
-            ? 'Nota: en modo mock, el CRUD no persiste; queda listo para conectar backend.'
-            : 'Modo empleado: solo lectura (no puedes agregar/editar/borrar).'
+            ? 'Admin: puedes crear/editar/borrar. (Con backend, persistirá).'
+            : 'Modo empleado: solo lectura.'
         }
       </div>
     </div>
@@ -274,7 +345,7 @@ export async function renderInventory(outlet){
     ` : ''}
   `;
 
-  // DataTable (todos)
+  // DataTable
   if(window.$ && $.fn.dataTable){
     if($.fn.DataTable.isDataTable('#tblInventory')){
       $('#tblInventory').DataTable().destroy();
@@ -391,14 +462,12 @@ export async function renderInventory(outlet){
     productModal.show();
   };
 
-  // --- BOTONES SUPERIORES ---
   outlet.querySelector('#btnNew')?.addEventListener('click', ()=> openProductModal(null));
   outlet.querySelector('#btnNewCategory')?.addEventListener('click', ()=>{
     document.getElementById('catName').value = '';
     categoryModal.show();
   });
 
-  // --- EVENTOS PRODUCTO ---
   document.getElementById('category').addEventListener('change', toggleSpecificUI);
 
   document.getElementById('imageFile').addEventListener('change', async (e)=>{
@@ -420,7 +489,7 @@ export async function renderInventory(outlet){
     renderImagePreview(imageBase64);
   });
 
-  // --- TABLA: EDITAR/BORRAR ---
+  // EDITAR/BORRAR
   outlet.addEventListener('click', async (e)=>{
     const editId = e.target?.dataset?.edit;
     const delId = e.target?.dataset?.del;
@@ -433,18 +502,18 @@ export async function renderInventory(outlet){
     if(delId){
       const r = await Swal.fire({
         title: '¿Eliminar producto?',
-        text: 'Esta acción se confirmará (mock no persistente).',
+        text: 'Esta acción se confirmará.',
         icon: 'warning',
         showCancelButton: true,
         confirmButtonText: 'Sí, borrar'
       });
       if(!r.isConfirmed) return;
       await inventoryService.deleteProduct(delId);
-      Swal.fire('Listo','Producto eliminado (mock). Recarga para ver cambios reales en backend.','success');
+      Swal.fire('Listo','Producto eliminado.','success');
     }
   });
 
-  // --- GUARDAR PRODUCTO ---
+  // GUARDAR PRODUCTO
   document.getElementById('btnSave').addEventListener('click', async ()=>{
     const category = document.getElementById('category').value;
 
@@ -484,6 +553,7 @@ export async function renderInventory(outlet){
 
     const file = document.getElementById('imageFile')?.files?.[0] || null;
 
+    // ✅ Intentamos con FormData (backend real)
     const fd = new FormData();
     fd.append('sku', payload.sku);
     fd.append('name', payload.name);
@@ -507,6 +577,8 @@ export async function renderInventory(outlet){
       productModal.hide();
       Swal.fire('Guardado','Producto guardado.','success');
     }catch(err){
+      // fallback mock
+      console.error(err);
       const fallbackPayload = { ...payload, imageBase64: imageBase64 || null };
       try{
         if(id) await inventoryService.updateProduct(id, fallbackPayload);
@@ -515,18 +587,17 @@ export async function renderInventory(outlet){
         productModal.hide();
         Swal.fire('Guardado (mock)','No se pudo subir al backend, se guardó local para vista.','warning');
       }catch(e2){
-        console.error(err, e2);
+        console.error(e2);
         Swal.fire('Error','No se pudo guardar el producto.','error');
       }
     }
   });
 
-  // --- GUARDAR CATEGORÍA ---
+  // GUARDAR CATEGORÍA
   document.getElementById('btnSaveCategory').addEventListener('click', async ()=>{
     const raw = document.getElementById('catName').value || '';
     let name = raw.trim();
 
-    // normaliza: MAYÚSCULAS, guiones bajos, sin espacios repetidos
     name = name
       .toUpperCase()
       .replaceAll('Á','A').replaceAll('É','E').replaceAll('Í','I').replaceAll('Ó','O').replaceAll('Ú','U').replaceAll('Ñ','N')
@@ -546,7 +617,6 @@ export async function renderInventory(outlet){
     const allExtras = Array.from(new Set([...current, name]));
     saveCategories(allExtras);
 
-    // ✅ refresca select del modal producto si existe
     rebuildCategorySelect(name);
 
     categoryModal.hide();
