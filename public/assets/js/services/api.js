@@ -33,6 +33,23 @@ class ApiService {
       }
     );
   }
+    async getBlob(path){
+    // Siempre va al backend real (no mock) para imágenes
+    const token = authService.getToken();
+
+    const url = this.baseURL.replace(/\/$/,'') + path; // baseURL + /products/1/image
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+
+    if(!res.ok){
+      const text = await res.text().catch(()=> '');
+      throw new Error(`GET BLOB failed ${res.status}: ${text}`);
+    }
+    return await res.blob();
+  }
+
 
   async _readMockDB() {
     const res = await fetch('../api/mock-data.json', { cache: 'no-store' });

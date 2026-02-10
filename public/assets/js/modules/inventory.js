@@ -1,10 +1,17 @@
+// inventory.js (FULL) — compatible con API real + token para imagen
+// Requiere: api.js tenga api.getBlob(path) (Opción A) usando authService.getToken()
+
 import { inventoryService } from '../services/inventoryService.js';
 import { authService } from '../services/authService.js';
+import { api } from '../services/api.js';
 import { money } from '../utils/helpers.js';
 
 const BASE_CATEGORIES = ['MICAS','BISEL','LENTES_CONTACTO','ARMAZONES','ACCESORIOS'];
 const CATEGORIES_KEY = 'pos.categories.v1';
 
+/* =========================
+ *  CATEGORÍAS: localStorage
+ *  ========================= */
 function loadCategories(){
   try{
     const raw = localStorage.getItem(CATEGORIES_KEY);
@@ -36,61 +43,111 @@ function safe(v){
     .replaceAll('"','&quot;');
 }
 
-/**
- * ✅ Normaliza rows para soportar:
- * A) Backend real: [{ id, sku, name, category, sale_price, buy_price, stock, ... }]
- * B) Mock viejo:   [{ stock, product:{...} }]
+/* =========================
+ *  CATEGORÍAS: label <-> code
+ *  ========================= */
+function normalizeText(s){
+  return String(s ?? '')
+    .trim()
+    .toLowerCase()
+    .replaceAll('á','a').replaceAll('é','e').replaceAll('í','i').replaceAll('ó','o').replaceAll('ú','u')
+    .replaceAll('ñ','n');
+}
+
+function mapCategoryToCode(cat){
+  const raw = String(cat ?? '').trim();
+  const upper = raw.toUpperCase();
+
+  if(BASE_CATEGORIES.includes(upper)) return upper;
+
+  const t = normalizeText(raw);
+  if(t.includes('mica')) return 'MICAS';
+  if(t.includes('lente de contacto') || t.includes('contacto')) return 'LENTES_CONTACTO';
+  if(t.includes('armazon') || t.includes('armaz')) return 'ARMAZONES';
+  if(t.includes('accesorio')) return 'ACCESORIOS';
+  if(t.includes('bisel')) return 'BISEL';
+
+  // fallback a "code"
+  return upper
+    .replace(/\s+/g,'_')
+    .replace(/[^A-Z0-9_]/g,'') || 'MICAS';
+}
+
+function mapCodeToLabel(code){
+  switch(String(code||'').toUpperCase()){
+    case 'MICAS': return 'Micas';
+    case 'LENTES_CONTACTO': return 'Lentes de Contacto';
+    case 'ARMAZONES': return 'Armazones';
+    case 'ACCESORIOS': return 'Accesorios';
+    case 'BISEL': return 'Bisel (servicio)';
+    default: return String(code||'');
+  }
+}
+
+/* =========================
+ *  NORMALIZACIÓN INVENTARIO
+ *  =========================
+ * A) Backend real (plano):
+ *    [{ id, sku, name, description, category, sale_price, buy_price, min_stock, max_stock, stock, critical, image, variants }]
+ * B) Mock viejo:
+ *    [{ stock, product:{...} }]
  */
 function normalizeRows(rows){
   const arr = Array.isArray(rows) ? rows : [];
-
-  // Si detectamos formato plano (backend)
   const looksFlat = arr.length && (
-    'sku' in arr[0] || 'sale_price' in arr[0] || 'category' in arr[0]
+    Object.prototype.hasOwnProperty.call(arr[0], 'sku') ||
+    Object.prototype.hasOwnProperty.call(arr[0], 'sale_price') ||
+    Object.prototype.hasOwnProperty.call(arr[0], 'category') ||
+    Object.prototype.hasOwnProperty.call(arr[0], 'stock')
   );
 
   if(looksFlat){
     return arr.map(p => {
-      const categoryRaw = p.category ?? '';
-      // tu API trae: "Micas", "Lentes de Contacto", "Bisel (servicio)"
-      // Para tu UI de reglas usamos también el "code" (MICAS etc.) si te lo mandan, si no, dejamos el label.
+      const catCode = mapCategoryToCode(p.category);
+      const supplier =
+        (typeof p.supplier === 'string' ? p.supplier :
+          (p.supplier?.name ?? p.supplier_name ?? ''));
+
       return {
         stock: Number(p.stock ?? 0),
+        critical: Boolean(p.critical ?? false),
         product: {
           id: p.id,
           sku: p.sku ?? '',
           name: p.name ?? '',
-          category: categoryRaw ?? '',
           description: p.description ?? '',
+          category: catCode,
+          categoryLabel: p.category ?? '',
           type: p.type ?? '',
-          supplier: p.supplier ?? '',
-          minStock: Number(p.min_stock ?? 0),
-          maxStock: p.max_stock ?? null,
-          buyPrice: Number(p.buy_price ?? 0),
-          salePrice: Number(p.sale_price ?? 0),
-
-          // compat para imagen/graduaciones si luego las mandas
+          supplier: supplier ?? '',
+          minStock: Number(p.min_stock ?? p.minStock ?? 0),
+          maxStock: (p.max_stock ?? p.maxStock ?? null),
+          buyPrice: Number(p.buy_price ?? p.buyPrice ?? 0),
+          salePrice: Number(p.sale_price ?? p.salePrice ?? 0),
+          // en API real puede venir null (la imagen se sirve por endpoint)
           imageUrl: p.image_url ?? null,
           imageBase64: p.image ?? null,
-          graduation: p.graduation ?? null,
-          bisel: p.bisel ?? null,
           variants: Array.isArray(p.variants) ? p.variants : []
         }
       };
     });
   }
 
-  // Formato mock antiguo
+  // Mock viejo
   return arr.map(r=>{
     const p = r.product || {};
+    const catCode = mapCategoryToCode(p.category);
+
     return {
       stock: Number(r.stock ?? 0),
+      critical: Boolean(r.critical ?? false),
       product: {
         id: p.id,
         sku: p.sku ?? '',
         name: p.name ?? '',
-        category: p.category ?? '',
         description: p.description ?? '',
+        category: catCode,
+        categoryLabel: p.category ?? '',
         type: p.type ?? '',
         supplier: p.supplier ?? '',
         minStock: Number(p.minStock ?? p.min_stock ?? 0),
@@ -99,19 +156,35 @@ function normalizeRows(rows){
         salePrice: Number(p.salePrice ?? p.sale_price ?? 0),
         imageUrl: p.imageUrl ?? p.image_url ?? null,
         imageBase64: p.imageBase64 ?? null,
-        graduation: p.graduation ?? null,
-        bisel: p.bisel ?? null,
         variants: Array.isArray(p.variants) ? p.variants : []
       }
     };
   });
 }
 
+/* =========================
+ *  IMAGEN PROTEGIDA (SANCTUM)
+ *  ========================= */
+async function loadProductImage(productId){
+  try{
+    // api.getBlob usa token (Opción A)
+    const blob = await api.getBlob(`/products/${productId}/image`);
+    return URL.createObjectURL(blob);
+  }catch(e){
+    console.warn('No se pudo cargar imagen:', e?.message || e);
+    return null;
+  }
+}
+
+/* =========================
+ *  RENDER
+ *  ========================= */
 export async function renderInventory(outlet){
   const role = authService.getRole();
+  const canEdit = role === 'admin';
+
   const rawRows = await inventoryService.list();
   const rows = normalizeRows(rawRows);
-  const canEdit = role === 'admin';
 
   let categories = loadCategories();
 
@@ -146,7 +219,10 @@ export async function renderInventory(outlet){
           <tbody>
             ${rows.map(r=>{
               const p = r.product || {};
-              const low = (Number(r.stock ?? 0) <= Number(p.minStock ?? 0));
+              const stock = Number(r.stock ?? 0);
+              const min = Number(p.minStock ?? 0);
+              const low = stock <= min;
+
               return `
                 <tr class="${low ? 'table-warning' : ''}">
                   <td>${safe(p.sku ?? '')}</td>
@@ -154,9 +230,9 @@ export async function renderInventory(outlet){
                     ${safe(p.name ?? '')}
                     ${low ? '<span class="badge text-bg-danger ms-2">Crítico</span>' : ''}
                   </td>
-                  <td>${safe(p.category ?? '')}</td>
-                  <td class="fw-semibold">${Number(r.stock ?? 0)}</td>
-                  <td>${Number(p.minStock ?? 0)}</td>
+                  <td>${safe(mapCodeToLabel(p.category ?? ''))}</td>
+                  <td class="fw-semibold">${stock}</td>
+                  <td>${min}</td>
                   <td>${p.maxStock ?? ''}</td>
                   <td>${money(p.salePrice ?? 0)}</td>
                   <td>${safe(p.supplier ?? '')}</td>
@@ -173,16 +249,12 @@ export async function renderInventory(outlet){
       </div>
 
       <div class="small text-muted mt-2">
-        ${
-          canEdit
-            ? 'Admin: puedes crear/editar/borrar. (Con backend, persistirá).'
-            : 'Modo empleado: solo lectura.'
-        }
+        ${canEdit ? 'Admin: puedes crear/editar/borrar.' : 'Modo empleado: solo lectura.'}
       </div>
     </div>
 
     ${canEdit ? `
-    <!-- Modal PRODUCTO (solo admin) -->
+    <!-- Modal PRODUCTO -->
     <div class="modal fade" id="productModal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog modal-lg modal-dialog-scrollable">
         <div class="modal-content">
@@ -251,7 +323,7 @@ export async function renderInventory(outlet){
                   <input class="form-control" id="supplier">
                 </div>
 
-                <!-- ✅ MICAS: SPH/CYL (sin eje) -->
+                <!-- MICAS -->
                 <div class="col-12" id="gradMicasBox" style="display:none;">
                   <div class="border rounded p-3 bg-light">
                     <div class="fw-semibold">Graduación (Micas)</div>
@@ -269,7 +341,7 @@ export async function renderInventory(outlet){
                   </div>
                 </div>
 
-                <!-- ✅ BISEL: EJE -->
+                <!-- BISEL -->
                 <div class="col-12" id="gradBiselBox" style="display:none;">
                   <div class="border rounded p-3 bg-light">
                     <div class="fw-semibold">Parámetros (Bisel)</div>
@@ -286,7 +358,7 @@ export async function renderInventory(outlet){
                   </div>
                 </div>
 
-                <!-- ✅ CONTACTO: SPH/CYL (sin eje) -->
+                <!-- CONTACTO -->
                 <div class="col-12" id="gradContactBox" style="display:none;">
                   <div class="border rounded p-3 bg-light">
                     <div class="fw-semibold">Graduación (Lentes de Contacto)</div>
@@ -317,7 +389,7 @@ export async function renderInventory(outlet){
       </div>
     </div>
 
-    <!-- Modal CATEGORÍA (solo admin) -->
+    <!-- Modal CATEGORÍA -->
     <div class="modal fade" id="categoryModal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog">
         <div class="modal-content">
@@ -332,7 +404,7 @@ export async function renderInventory(outlet){
               <div class="form-text">Tip: usa MAYÚSCULAS y sin acentos.</div>
             </div>
             <div class="alert alert-light border mb-0 small">
-              Mock: se guardará en <b>localStorage</b>. En backend, esto sería <code>POST /api/categories</code>.
+              Se guardará en <b>localStorage</b> (por ahora). En backend: <code>POST /api/categories</code>.
             </div>
           </div>
           <div class="modal-footer">
@@ -362,18 +434,20 @@ export async function renderInventory(outlet){
     });
   }
 
-  // ✅ EMPLEADO: sale aquí
+  // Empleado: solo lectura
   if(!canEdit) return;
 
-  // --- MODALES ---
+  // Modales
   const productModal = new bootstrap.Modal(document.getElementById('productModal'));
   const categoryModal = new bootstrap.Modal(document.getElementById('categoryModal'));
 
   let imageBase64 = null;
+  let currentPreviewObjectUrl = null; // para liberar URL.createObjectURL
 
   const renderImagePreview = (src)=>{
     const img = document.getElementById('imagePreview');
     const empty = document.getElementById('imageEmpty');
+
     if(!src){
       img.style.display = 'none';
       empty.style.display = 'flex';
@@ -418,7 +492,13 @@ export async function renderInventory(outlet){
     if(selected && categories.includes(selected)) sel.value = selected;
   };
 
-  const openProductModal = (p=null)=>{
+  const openProductModal = async (p=null)=>{
+    // limpiar preview anterior (si era objectURL)
+    if(currentPreviewObjectUrl){
+      URL.revokeObjectURL(currentPreviewObjectUrl);
+      currentPreviewObjectUrl = null;
+    }
+
     document.getElementById('modalTitle').textContent = p ? 'Editar producto' : 'Nuevo producto';
 
     document.getElementById('productId').value = p?.id ?? '';
@@ -431,43 +511,38 @@ export async function renderInventory(outlet){
     document.getElementById('buyPrice').value = p?.buyPrice ?? '';
     document.getElementById('salePrice').value = p?.salePrice ?? '';
     document.getElementById('minStock').value = p?.minStock ?? '';
-    document.getElementById('maxStock').value = p?.maxStock ?? '';
+    document.getElementById('maxStock').value = (p?.maxStock ?? '');
     document.getElementById('supplier').value = p?.supplier ?? '';
 
     const fileInput = document.getElementById('imageFile');
     if(fileInput) fileInput.value = '';
 
-    const imgUrl = p?.imageUrl || p?.image_url || null;
-    imageBase64 = p?.imageBase64 || null;
-    renderImagePreview(imgUrl || imageBase64);
+    imageBase64 = null;
+    renderImagePreview(null);
 
     clearSpecificInputs();
 
-    const cat = p?.category ?? document.getElementById('category').value;
-    const g = p?.graduation || {};
-    const b = p?.bisel || {};
-
-    if(cat === 'MICAS'){
-      document.getElementById('mSph').value = g.sph ?? '';
-      document.getElementById('mCyl').value = g.cyl ?? '';
-    }else if(cat === 'BISEL'){
-      document.getElementById('bAxis').value = b.axis ?? '';
-      document.getElementById('bNotes').value = b.notes ?? '';
-    }else if(cat === 'LENTES_CONTACTO'){
-      document.getElementById('cSph').value = g.sph ?? '';
-      document.getElementById('cCyl').value = g.cyl ?? '';
+    // Cargar imagen del backend (protegida)
+    if(p?.id){
+      const imgUrl = await loadProductImage(p.id);
+      if(imgUrl){
+        currentPreviewObjectUrl = imgUrl;
+        renderImagePreview(imgUrl);
+      }
     }
 
     toggleSpecificUI();
     productModal.show();
   };
 
+  // Botones
   outlet.querySelector('#btnNew')?.addEventListener('click', ()=> openProductModal(null));
   outlet.querySelector('#btnNewCategory')?.addEventListener('click', ()=>{
     document.getElementById('catName').value = '';
     categoryModal.show();
   });
 
+  // Eventos
   document.getElementById('category').addEventListener('change', toggleSpecificUI);
 
   document.getElementById('imageFile').addEventListener('change', async (e)=>{
@@ -485,18 +560,25 @@ export async function renderInventory(outlet){
       return;
     }
 
+    // si habíamos cargado una imagen del backend por objectURL, la liberamos
+    if(currentPreviewObjectUrl){
+      URL.revokeObjectURL(currentPreviewObjectUrl);
+      currentPreviewObjectUrl = null;
+    }
+
     imageBase64 = await readImageFileToBase64(file);
     renderImagePreview(imageBase64);
   });
 
-  // EDITAR/BORRAR
+  // Editar / Borrar
   outlet.addEventListener('click', async (e)=>{
     const editId = e.target?.dataset?.edit;
     const delId = e.target?.dataset?.del;
 
     if(editId){
       const p = rows.map(r=>r.product).find(x=>String(x?.id)===String(editId));
-      openProductModal(p);
+      await openProductModal(p);
+      return;
     }
 
     if(delId){
@@ -508,12 +590,16 @@ export async function renderInventory(outlet){
         confirmButtonText: 'Sí, borrar'
       });
       if(!r.isConfirmed) return;
+
       await inventoryService.deleteProduct(delId);
       Swal.fire('Listo','Producto eliminado.','success');
+
+      // ✅ refrescar vista
+      await renderInventory(outlet);
     }
   });
 
-  // GUARDAR PRODUCTO
+  // Guardar producto
   document.getElementById('btnSave').addEventListener('click', async ()=>{
     const category = document.getElementById('category').value;
 
@@ -546,14 +632,13 @@ export async function renderInventory(outlet){
       supplier: document.getElementById('supplier').value.trim()
     };
 
-    if(!payload.sku || !payload.name){
-      Swal.fire('Faltan datos','SKU y Nombre son obligatorios.','info');
+    if(!payload.sku || !payload.name || !payload.category){
+      Swal.fire('Faltan datos','SKU, Nombre y Categoría son obligatorios.','info');
       return;
     }
 
     const file = document.getElementById('imageFile')?.files?.[0] || null;
 
-    // ✅ Intentamos con FormData (backend real)
     const fd = new FormData();
     fd.append('sku', payload.sku);
     fd.append('name', payload.name);
@@ -576,24 +661,16 @@ export async function renderInventory(outlet){
 
       productModal.hide();
       Swal.fire('Guardado','Producto guardado.','success');
-    }catch(err){
-      // fallback mock
-      console.error(err);
-      const fallbackPayload = { ...payload, imageBase64: imageBase64 || null };
-      try{
-        if(id) await inventoryService.updateProduct(id, fallbackPayload);
-        else await inventoryService.createProduct(fallbackPayload);
 
-        productModal.hide();
-        Swal.fire('Guardado (mock)','No se pudo subir al backend, se guardó local para vista.','warning');
-      }catch(e2){
-        console.error(e2);
-        Swal.fire('Error','No se pudo guardar el producto.','error');
-      }
+      // ✅ refrescar tabla
+      await renderInventory(outlet);
+    }catch(err){
+      console.error(err);
+      Swal.fire('Error','No se pudo guardar el producto. Revisa consola/Network.','error');
     }
   });
 
-  // GUARDAR CATEGORÍA
+  // Guardar categoría (localStorage por ahora)
   document.getElementById('btnSaveCategory').addEventListener('click', async ()=>{
     const raw = document.getElementById('catName').value || '';
     let name = raw.trim();
@@ -620,6 +697,6 @@ export async function renderInventory(outlet){
     rebuildCategorySelect(name);
 
     categoryModal.hide();
-    Swal.fire('Guardado','Categoría creada (mock).','success');
+    Swal.fire('Guardado','Categoría creada (local).','success');
   });
 }
