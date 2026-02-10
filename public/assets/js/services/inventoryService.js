@@ -28,7 +28,6 @@ class InventoryService{
   }
 
   async updateProduct(id, payload){
-    // ✅ CLAVE: Laravel no lee bien multipart con PUT; usamos POST + _method
     if(payload instanceof FormData){
       payload.append('_method', 'PUT');
       return (await api.post(`/products/${id}`, payload)).data;
@@ -38,6 +37,10 @@ class InventoryService{
 
   async deleteProduct(id){
     return (await api.delete(`/products/${id}`)).data;
+  }
+  async addStock(productId, payload){
+    // payload ejemplo: { qty: 5, note: "Entrada desde inventario" }
+    return (await api.post(`/products/${productId}/stock`, payload)).data;
   }
 }
 
