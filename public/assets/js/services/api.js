@@ -14,10 +14,14 @@ class ApiService {
 
     this.client.interceptors.request.use((config) => {
       const token = authService.getToken();
-      if (token) config.headers.Authorization = `Bearer ${token}`;
-      // IMPORTANTE: axios ya manda application/json por defecto cuando body es objeto,
-      // pero lo dejamos explícito para evitar problemas.
+
+      // ✅ Siempre JSON (evita redirects/errores raros en API)
+      config.headers = config.headers || {};
       config.headers.Accept = 'application/json';
+
+      // ✅ Token si existe
+      if (token) config.headers.Authorization = `Bearer ${token}`;
+
       return config;
     });
 
@@ -25,6 +29,10 @@ class ApiService {
       (res) => res,
       (err) => {
         const status = err?.response?.status;
+
+        // ✅ Si el backend responde HTML (por redirect), aquí lo notas rápido
+        // console.log('API ERROR', status, err?.response?.headers, err?.response?.data);
+
         if (status === 401) {
           authService.logout();
           location.hash = '#/login';
@@ -33,22 +41,37 @@ class ApiService {
       }
     );
   }
-    async getBlob(path){
-    // Siempre va al backend real (no mock) para imágenes
-    const token = authService.getToken();
 
-    const url = this.baseURL.replace(/\/$/,'') + path; // baseURL + /products/1/image
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
+  /**
+   * ✅ Descargar blobs (imágenes protegidas)
+   * - Siempre manda token
+   * - Siempre manda Accept: application/json (para que API no intente redirect)
+   * - No usa mock (porque imágenes vienen del backend real)
+   */
+  async getBlob(path){
+  const token = authService.getToken();
+  const url = this.baseURL.replace(/\/$/,'') + path;
 
-    if(!res.ok){
-      const text = await res.text().catch(()=> '');
-      throw new Error(`GET BLOB failed ${res.status}: ${text}`);
-    }
-    return await res.blob();
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      Accept: 'application/octet-stream'
+    },
+  });
+
+  if(res.status === 401){
+    authService.logout();
+    location.hash = '#/login';
+    throw new Error('No autorizado');
   }
+
+  if(!res.ok){
+    const text = await res.text().catch(()=> '');
+    throw new Error(`GET BLOB failed ${res.status}: ${text}`);
+  }
+  return await res.blob();
+}
 
 
   async _readMockDB() {

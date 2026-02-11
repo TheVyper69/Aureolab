@@ -1,17 +1,24 @@
-// inventory.js (FULL)
-// Vista con tabs: Inventario / Categorías
-// - Inventario: CRUD producto + cargar imagen protegida + aumentar stock
-// - Categorías: CRUD categorías con DataTable y botones
+// public/assets/js/pages/inventory.js
+// INVENTORY (FULL) - REAL BACKEND (Laravel) + Sanctum token (Opción A)
+//
+// ✅ Funciona con tu backend actual:
+// - ProductsController espera (store/update): sku, name, category (CODE), buyPrice, salePrice, minStock, maxStock, supplier, description, image
+// - ProductsController.image(id): GET /api/products/{id}/image (protegida, requiere token)
+// - InventoryService.updateProduct: si FormData => manda POST + _method=PUT (por tu 405)
+// - CategoriesController: index/store/update/destroy con fields: code, name, description
+//
+// ✅ Lo que resuelve:
+// - Evita el 422 de "category required ..." mandando category + category_id + categoryId
+// - Select de categoría usa CODE (MICAS, BISEL, etc.) pero también resuelve el ID
+// - Editar abre modal y carga imagen real usando api.getBlob (con token)
+// - CRUD productos + CRUD categorías + add stock
+// - DataTables con destroy correcto
 //
 // Requiere:
-// - inventoryService.js con métodos:
-//   list(), lowStock(),
-//   listCategories(), createCategory(payload), updateCategory(id,payload), deleteCategory(id),
-//   createProduct(payload), updateProduct(id,payload), deleteProduct(id),
-//   addStock(productId, payload)
-// - api.js exporte { api } con getBlob(path) que mande token (Sanctum) (Opción A)
-// - authService.getRole() y authService.getToken()
-// - SweetAlert2 (Swal) + Bootstrap (bootstrap.Modal) + DataTables (jQuery)
+// - inventoryService.js (el que pegaste)
+// - api.js (el que pegaste, con api.getBlob())
+// - authService.js con getRole(), getToken(), logout()
+// - Swal (SweetAlert2), bootstrap.Modal, jQuery + DataTables
 
 import { inventoryService } from '../services/inventoryService.js';
 import { authService } from '../services/authService.js';
@@ -19,8 +26,8 @@ import { api } from '../services/api.js';
 import { money } from '../utils/helpers.js';
 
 /* =========================
- *  Helpers
- *  ========================= */
+ * Helpers
+ * ========================= */
 function safe(v){
   return String(v ?? '')
     .replaceAll('&','&amp;')
@@ -29,27 +36,75 @@ function safe(v){
     .replaceAll('"','&quot;');
 }
 
-function normalizeText(s){
-  return String(s ?? '')
+function pickCategoryName(c){
+  return c?.name ?? c?.label ?? c?.title ?? '';
+}
+
+function pickCategoryCode(c){
+  // en tu backend: categories => { id, code, name }
+  return String(c?.code ?? c?.slug ?? '').trim();
+}
+
+function buildCodeFromName(name){
+  return String(name || '')
     .trim()
-    .toLowerCase()
-    .replaceAll('á','a').replaceAll('é','e').replaceAll('í','i').replaceAll('ó','o').replaceAll('ú','u')
-    .replaceAll('ñ','n');
+    .toUpperCase()
+    .replaceAll('Á','A').replaceAll('É','E').replaceAll('Í','I').replaceAll('Ó','O').replaceAll('Ú','U').replaceAll('Ñ','N')
+    .replace(/\s+/g,'_')
+    .replace(/[^A-Z0-9_]/g,'');
+}
+
+function mountDataTable(selector){
+  if(!(window.$ && $.fn.dataTable)) return null;
+
+  if($.fn.DataTable.isDataTable(selector)){
+    $(selector).DataTable().destroy();
+  }
+
+  return $(selector).DataTable({
+    pageLength: 10,
+    language: {
+      search: "Buscar:",
+      lengthMenu: "Mostrar _MENU_",
+      info: "Mostrando _START_ a _END_ de _TOTAL_",
+      paginate: { previous: "Anterior", next: "Siguiente" },
+      zeroRecords: "No hay registros"
+    }
+  });
+}
+
+function extractAxiosErrorMessage(err){
+  const status = err?.response?.status;
+  const data = err?.response?.data;
+
+  if(status === 422 && data?.errors){
+    const lines = [];
+    for(const k of Object.keys(data.errors)){
+      const arr = data.errors[k] || [];
+      for(const msg of arr){
+        lines.push(`• ${msg}`);
+      }
+    }
+    return lines.length ? lines.join('<br>') : (data.message || 'Error de validación');
+  }
+  return data?.message || err?.message || 'Ocurrió un error';
 }
 
 /* =========================
- *  Normalización INVENTARIO
- *  =========================
- * API real (plano):
- * [{ id, sku, name, description, category, category_id, sale_price, buy_price, min_stock, max_stock, stock, supplier, variants }]
- */
+ * Normalización INVENTARIO
+ * A) API real (flat):
+ * [{ id, sku, name, description, category (string o obj), category_id, buy_price, sale_price, min_stock, max_stock, stock, supplier }]
+ * B) mock viejo:
+ * [{ stock, product:{...} }]
+ * ========================= */
 function normalizeInventoryRows(rows){
   const arr = Array.isArray(rows) ? rows : [];
   const looksFlat = arr.length && (
     Object.prototype.hasOwnProperty.call(arr[0], 'sku') ||
     Object.prototype.hasOwnProperty.call(arr[0], 'stock') ||
     Object.prototype.hasOwnProperty.call(arr[0], 'sale_price') ||
-    Object.prototype.hasOwnProperty.call(arr[0], 'buy_price')
+    Object.prototype.hasOwnProperty.call(arr[0], 'buy_price') ||
+    Object.prototype.hasOwnProperty.call(arr[0], 'category_id')
   );
 
   if(looksFlat){
@@ -59,7 +114,7 @@ function normalizeInventoryRows(rows){
           (p.supplier?.name ?? p.supplier_name ?? ''));
 
       const catLabel =
-        (typeof p.category === 'string' ? p.category : (p.category?.name ?? ''));
+        (typeof p.category === 'string' ? p.category : (p.category?.name ?? p.category_label ?? ''));
 
       const catId =
         p.category_id ?? p.categoryId ?? p.category?.id ?? null;
@@ -85,8 +140,8 @@ function normalizeInventoryRows(rows){
     });
   }
 
-  // fallback a formato viejo: [{ stock, product:{...} }]
-  return (arr || []).map(r=>{
+  // fallback mock viejo
+  return arr.map(r=>{
     const p = r.product || {};
     return {
       stock: Number(r.stock ?? 0),
@@ -110,8 +165,8 @@ function normalizeInventoryRows(rows){
 }
 
 /* =========================
- *  Imagen protegida (Sanctum)
- *  ========================= */
+ * Imagen protegida (Sanctum)
+ * ========================= */
 async function loadProductImageUrl(productId){
   try{
     const blob = await api.getBlob(`/products/${productId}/image`);
@@ -123,48 +178,26 @@ async function loadProductImageUrl(productId){
 }
 
 /* =========================
- *  DataTable helper
- *  ========================= */
-function mountDataTable(selector){
-  if(!(window.$ && $.fn.dataTable)) return null;
-
-  if($.fn.DataTable.isDataTable(selector)){
-    $(selector).DataTable().destroy();
-  }
-
-  return $(selector).DataTable({
-    pageLength: 10,
-    language: {
-      search: "Buscar:",
-      lengthMenu: "Mostrar _MENU_",
-      info: "Mostrando _START_ a _END_ de _TOTAL_",
-      paginate: { previous: "Anterior", next: "Siguiente" },
-      zeroRecords: "No hay registros"
-    }
-  });
-}
-
-/* =========================
- *  Main render
- *  ========================= */
+ * Main render
+ * ========================= */
 export async function renderInventory(outlet){
   const role = authService.getRole();
-  const canEdit = role === 'admin';
+  const token = authService.getToken();
+  const canEdit = (role === 'admin') && !!token; // ✅ SOLO admin logeado edita
 
-  // estado de vista (persistente mientras no recargues)
-  let view = outlet.dataset.invView || 'inventory'; // 'inventory' | 'categories'
+  // vista actual
+  let view = outlet.dataset.invView || 'inventory'; // inventory | categories
   outlet.dataset.invView = view;
 
-  // cache en memoria para la sesión de la vista
+  // data en memoria
   let categories = [];
   let inventoryRows = [];
 
-  // bootstrap modals (solo existen en inventario)
+  // modal
   let productModal = null;
-
-  // manejo objectURL para preview (para liberar memoria)
   let currentPreviewObjectUrl = null;
 
+  /* ---------- Render Shell ---------- */
   const renderShell = () => {
     outlet.innerHTML = `
       <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between mb-3">
@@ -176,9 +209,10 @@ export async function renderInventory(outlet){
           </div>
         </div>
 
-        ${canEdit ? `
-          <div class="d-flex gap-2" id="topActions"></div>
-        ` : `<div class="small text-muted">Modo empleado: solo lectura.</div>`}
+        ${canEdit
+          ? `<div class="d-flex gap-2" id="topActions"></div>`
+          : `<div class="small text-muted">Solo admin logeado puede editar.</div>`
+        }
       </div>
 
       <div id="invContent"></div>
@@ -202,8 +236,114 @@ export async function renderInventory(outlet){
     }
   };
 
+  /* ---------- Product Modal HTML ---------- */
+  const renderProductModalHtml = () => {
+    // ✅ select por CODE (value=code), pero mostramos Name + Code
+    const options = (categories || []).map(c=>{
+      const code = pickCategoryCode(c);
+      const name = pickCategoryName(c) || `Categoría #${c.id}`;
+      return `<option value="${safe(code)}">${safe(name)} (${safe(code)})</option>`;
+    }).join('');
+
+    return `
+      <div class="modal fade" id="productModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+          <div class="modal-content">
+
+            <div class="modal-header">
+              <h5 class="modal-title" id="modalTitle">Producto</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+            </div>
+
+            <div class="modal-body">
+              <form id="productForm">
+                <div class="row g-3">
+
+                  <div class="col-md-4">
+                    <label class="form-label">SKU</label>
+                    <input class="form-control" id="sku" required>
+                  </div>
+
+                  <div class="col-md-8">
+                    <label class="form-label">Nombre</label>
+                    <input class="form-control" id="name" required>
+                  </div>
+
+                  <div class="col-md-4">
+                    <label class="form-label">Categoría</label>
+                    <select class="form-select" id="category" required>
+                      <option value="">-- Selecciona --</option>
+                      ${options}
+                    </select>
+                    <div class="form-text">Value = CODE (MICAS, BISEL...).</div>
+                  </div>
+
+                  <div class="col-md-8">
+                    <label class="form-label">Descripción</label>
+                    <input class="form-control" id="description" placeholder="Descripción breve (opcional)">
+                  </div>
+
+                  <div class="col-md-8">
+                    <label class="form-label">Imagen del producto</label>
+                    <input type="file" class="form-control" id="imageFile" accept="image/*">
+                    <div class="form-text">Se carga al backend y se lee con token.</div>
+                  </div>
+
+                  <div class="col-md-4 d-flex align-items-end">
+                    <div class="border rounded w-100 overflow-hidden" style="height:84px; background:#F8F9FA;">
+                      <img id="imagePreview" alt="preview" style="width:100%; height:84px; object-fit:cover; display:none;">
+                      <div id="imageEmpty" class="small text-muted d-flex align-items-center justify-content-center h-100">
+                        Sin imagen
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="col-md-4">
+                    <label class="form-label">Precio compra</label>
+                    <input type="number" class="form-control" id="buyPrice" min="0" step="0.01">
+                  </div>
+
+                  <div class="col-md-4">
+                    <label class="form-label">Precio venta</label>
+                    <input type="number" class="form-control" id="salePrice" min="0" step="0.01">
+                  </div>
+
+                  <div class="col-md-4">
+                    <label class="form-label">Stock mín</label>
+                    <input type="number" class="form-control" id="minStock" min="0">
+                  </div>
+
+                  <div class="col-md-4">
+                    <label class="form-label">Stock máx</label>
+                    <input type="number" class="form-control" id="maxStock" min="0">
+                  </div>
+
+                  <div class="col-md-4">
+                    <label class="form-label">Proveedor</label>
+                    <input class="form-control" id="supplier">
+                  </div>
+
+                </div>
+
+                <input type="hidden" id="productId">
+              </form>
+            </div>
+
+            <div class="modal-footer">
+              <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+              <button class="btn btn-brand" id="btnSaveProduct">Guardar</button>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  /* ---------- Tables Render ---------- */
   const renderInventoryTable = () => {
     const content = outlet.querySelector('#invContent');
+
     content.innerHTML = `
       <div class="card p-3">
         <div class="table-responsive">
@@ -254,8 +394,9 @@ export async function renderInventory(outlet){
             </tbody>
           </table>
         </div>
+
         <div class="small text-muted mt-2">
-          ${canEdit ? 'Admin: puedes crear/editar/borrar y aumentar stock.' : 'Modo empleado: solo lectura.'}
+          ${canEdit ? 'Admin: CRUD + stock + imagen protegida.' : 'Solo admin logeado puede editar.'}
         </div>
       </div>
 
@@ -265,7 +406,6 @@ export async function renderInventory(outlet){
     mountDataTable('#tblInventory');
 
     if(canEdit){
-      // init modal
       productModal = new bootstrap.Modal(document.getElementById('productModal'));
       wireProductModalHandlers();
     }
@@ -273,6 +413,7 @@ export async function renderInventory(outlet){
 
   const renderCategoriesTable = () => {
     const content = outlet.querySelector('#invContent');
+
     content.innerHTML = `
       <div class="card p-3">
         <div class="table-responsive">
@@ -280,21 +421,24 @@ export async function renderInventory(outlet){
             <thead>
               <tr>
                 <th>ID</th>
-                <th>Nombre</th>
                 <th>Code</th>
+                <th>Nombre</th>
+                <th>Descripción</th>
                 ${canEdit ? '<th>Acciones</th>' : ''}
               </tr>
             </thead>
             <tbody>
-              ${categories.map(c=>{
+              ${(categories || []).map(c=>{
                 const id = c.id ?? '';
-                const name = c.name ?? c.label ?? '';
-                const code = c.code ?? c.slug ?? (name ? name.toUpperCase().replace(/\s+/g,'_') : '');
+                const code = pickCategoryCode(c);
+                const name = pickCategoryName(c);
+                const desc = c.description ?? '';
                 return `
                   <tr>
                     <td>${safe(id)}</td>
-                    <td>${safe(name)}</td>
                     <td><code>${safe(code)}</code></td>
+                    <td>${safe(name)}</td>
+                    <td>${safe(desc)}</td>
                     ${canEdit ? `
                       <td class="text-nowrap">
                         <button class="btn btn-sm btn-outline-brand me-1" data-cat-edit="${id}">Editar</button>
@@ -307,8 +451,9 @@ export async function renderInventory(outlet){
             </tbody>
           </table>
         </div>
+
         <div class="small text-muted mt-2">
-          ${canEdit ? 'Admin: CRUD completo de categorías.' : 'Modo empleado: solo lectura.'}
+          ${canEdit ? 'Admin: CRUD completo de categorías.' : 'Solo admin logeado puede editar.'}
         </div>
       </div>
     `;
@@ -316,113 +461,11 @@ export async function renderInventory(outlet){
     mountDataTable('#tblCategories');
   };
 
-  const renderProductModalHtml = () => {
-    // select categories (si viene vacío, al menos muestra placeholder)
-    const options = (categories.length ? categories : []).map(c=>{
-      const id = c.id;
-      const name = c.name ?? c.label ?? `Categoría #${id}`;
-      return `<option value="${safe(id)}">${safe(name)}</option>`;
-    }).join('');
-
-    return `
-      <div class="modal fade" id="productModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-lg modal-dialog-scrollable">
-          <div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title" id="modalTitle">Producto</h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
-            </div>
-
-            <div class="modal-body">
-              <form id="productForm">
-                <div class="row g-3">
-
-                  <div class="col-md-4">
-                    <label class="form-label">SKU</label>
-                    <input class="form-control" id="sku" required>
-                  </div>
-
-                  <div class="col-md-8">
-                    <label class="form-label">Nombre</label>
-                    <input class="form-control" id="name" required>
-                  </div>
-
-                  <div class="col-md-4">
-                    <label class="form-label">Categoría</label>
-                    <select class="form-select" id="categoryId" required>
-                      <option value="">-- Selecciona --</option>
-                      ${options}
-                    </select>
-                    <div class="form-text">Admin puede crear categorías en la pestaña “Categorías”.</div>
-                  </div>
-
-                  <div class="col-md-8">
-                    <label class="form-label">Descripción</label>
-                    <input class="form-control" id="description" placeholder="Descripción breve (opcional)">
-                  </div>
-
-                  <div class="col-md-8">
-                    <label class="form-label">Imagen del producto</label>
-                    <input type="file" class="form-control" id="imageFile" accept="image/*">
-                    <div class="form-text">Se carga al backend y se obtiene con token.</div>
-                  </div>
-
-                  <div class="col-md-4 d-flex align-items-end">
-                    <div class="border rounded w-100 overflow-hidden" style="height:84px; background:#F8F9FA;">
-                      <img id="imagePreview" alt="preview" style="width:100%; height:84px; object-fit:cover; display:none;">
-                      <div id="imageEmpty" class="small text-muted d-flex align-items-center justify-content-center h-100">
-                        Sin imagen
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="col-md-4">
-                    <label class="form-label">Precio compra</label>
-                    <input type="number" class="form-control" id="buyPrice" min="0" step="0.01">
-                  </div>
-
-                  <div class="col-md-4">
-                    <label class="form-label">Precio venta</label>
-                    <input type="number" class="form-control" id="salePrice" min="0" step="0.01">
-                  </div>
-
-                  <div class="col-md-4">
-                    <label class="form-label">Stock mín</label>
-                    <input type="number" class="form-control" id="minStock" min="0">
-                  </div>
-
-                  <div class="col-md-4">
-                    <label class="form-label">Stock máx</label>
-                    <input type="number" class="form-control" id="maxStock" min="0">
-                  </div>
-
-                  <div class="col-md-4">
-                    <label class="form-label">Proveedor</label>
-                    <input class="form-control" id="supplier">
-                  </div>
-
-                </div>
-
-                <input type="hidden" id="productId">
-              </form>
-            </div>
-
-            <div class="modal-footer">
-              <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
-              <button class="btn btn-brand" id="btnSaveProduct">Guardar</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-  };
-
-  /* =========================
-   *  Product modal logic
-   *  ========================= */
+  /* ---------- Product Modal Logic ---------- */
   const renderImagePreview = (src)=>{
     const img = document.getElementById('imagePreview');
     const empty = document.getElementById('imageEmpty');
+    if(!img || !empty) return;
 
     if(!src){
       img.style.display = 'none';
@@ -435,24 +478,14 @@ export async function renderInventory(outlet){
     empty.style.display = 'none';
   };
 
-  const readImageFileToBase64 = (file)=>{
-    return new Promise((resolve, reject)=>{
-      if(!file) return resolve(null);
-      const reader = new FileReader();
-      reader.onload = ()=> resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-  };
-
   const openProductModal = async (productOrNull) => {
-    // liberar objectURL anterior si había
+    // limpiar objectURL previo
     if(currentPreviewObjectUrl){
       URL.revokeObjectURL(currentPreviewObjectUrl);
       currentPreviewObjectUrl = null;
     }
 
-    const p = productOrNull;
+    const p = productOrNull || null;
 
     document.getElementById('modalTitle').textContent = p ? 'Editar producto' : 'Nuevo producto';
     document.getElementById('productId').value = p?.id ?? '';
@@ -465,11 +498,25 @@ export async function renderInventory(outlet){
     document.getElementById('maxStock').value = (p?.maxStock ?? '');
     document.getElementById('supplier').value = p?.supplier ?? '';
 
-    // select categoría
-    const sel = document.getElementById('categoryId');
-    sel.value = p?.categoryId ?? '';
+    // ✅ set category select por CODE (si lo conocemos)
+    // Si tu inventory.list no trae code, intentamos resolver por categoryId->categories[].code
+    const sel = document.getElementById('category');
+    let codeToSet = '';
 
-    // reset file input
+    if(p?.categoryId){
+      const cat = (categories || []).find(c => String(c.id) === String(p.categoryId));
+      codeToSet = pickCategoryCode(cat);
+    }
+
+    // fallback por label (si tu label coincide con name)
+    if(!codeToSet && p?.categoryLabel){
+      const cat2 = (categories || []).find(c => String(pickCategoryName(c)).trim() === String(p.categoryLabel).trim());
+      codeToSet = pickCategoryCode(cat2);
+    }
+
+    sel.value = codeToSet || '';
+
+    // reset file
     const fileInput = document.getElementById('imageFile');
     if(fileInput) fileInput.value = '';
 
@@ -488,7 +535,11 @@ export async function renderInventory(outlet){
   };
 
   const wireProductModalHandlers = () => {
-    document.getElementById('imageFile')?.addEventListener('change', async (e)=>{
+    const fileInput = document.getElementById('imageFile');
+    const btnSave = document.getElementById('btnSaveProduct');
+
+    // preview local de imagen
+    fileInput?.addEventListener('change', async (e)=>{
       const file = e.target.files?.[0];
       if(!file) return;
 
@@ -503,40 +554,57 @@ export async function renderInventory(outlet){
         return;
       }
 
-      // si había url de backend, liberar
+      // si había objectURL de backend, liberar
       if(currentPreviewObjectUrl){
         URL.revokeObjectURL(currentPreviewObjectUrl);
         currentPreviewObjectUrl = null;
       }
 
-      const base64 = await readImageFileToBase64(file);
-      renderImagePreview(base64);
+      const reader = new FileReader();
+      reader.onload = ()=> renderImagePreview(reader.result);
+      reader.readAsDataURL(file);
     });
 
-    document.getElementById('btnSaveProduct')?.addEventListener('click', async ()=>{
+    // guardar producto
+    btnSave?.addEventListener('click', async ()=>{
       const id = document.getElementById('productId').value || '';
       const sku = document.getElementById('sku').value.trim();
       const name = document.getElementById('name').value.trim();
-      const categoryId = document.getElementById('categoryId').value;
+      const categoryCode = (document.getElementById('category').value || '').trim();
       const description = document.getElementById('description').value.trim();
 
-      if(!sku || !name || !categoryId){
+      if(!sku || !name || !categoryCode){
         Swal.fire('Faltan datos','SKU, Nombre y Categoría son obligatorios.','info');
+        return;
+      }
+
+      // ✅ Resolver category_id por code
+      const catObj = (categories || []).find(c => String(pickCategoryCode(c)) === String(categoryCode));
+      const categoryId = catObj?.id ?? '';
+
+      if(!categoryId){
+        Swal.fire('Categoría inválida', `No existe la categoría con code: ${categoryCode}`, 'warning');
         return;
       }
 
       const file = document.getElementById('imageFile')?.files?.[0] || null;
 
-      // FormData para backend (imagen)
+      // ✅ Para tu ProductsController (camelCase) + compat con validaciones required_without
       const fd = new FormData();
       fd.append('sku', sku);
       fd.append('name', name);
+
+      // manda TODAS para que nunca falle el "required when ..."
+      fd.append('category', categoryCode);
       fd.append('category_id', String(categoryId));
+      fd.append('categoryId', String(categoryId));
+
       fd.append('description', description || '');
-      fd.append('buy_price', String(Number(document.getElementById('buyPrice').value || 0)));
-      fd.append('sale_price', String(Number(document.getElementById('salePrice').value || 0)));
-      fd.append('min_stock', String(Number(document.getElementById('minStock').value || 0)));
-      fd.append('max_stock', String(Number(document.getElementById('maxStock').value || 0)));
+
+      fd.append('buyPrice', String(Number(document.getElementById('buyPrice').value || 0)));
+      fd.append('salePrice', String(Number(document.getElementById('salePrice').value || 0)));
+      fd.append('minStock', String(Number(document.getElementById('minStock').value || 0)));
+      fd.append('maxStock', String(Number(document.getElementById('maxStock').value || 0)));
       fd.append('supplier', (document.getElementById('supplier').value || '').trim());
 
       if(file) fd.append('image', file);
@@ -550,100 +618,12 @@ export async function renderInventory(outlet){
         await refresh('inventory');
       }catch(err){
         console.error(err);
-        Swal.fire('Error','No se pudo guardar el producto. Revisa consola/Network.','error');
+        Swal.fire('Error', extractAxiosErrorMessage(err), 'error');
       }
     });
   };
 
-  /* =========================
-   *  Actions / refresh
-   *  ========================= */
-  const loadData = async () => {
-    // trae categorías siempre (para select del modal y pestaña)
-    try{
-      const cats = await inventoryService.listCategories();
-      categories = Array.isArray(cats) ? cats : [];
-    }catch(e){
-      console.warn('No se pudieron cargar categorías:', e);
-      categories = [];
-    }
-
-    if(view === 'inventory'){
-      const rawRows = await inventoryService.list();
-      inventoryRows = normalizeInventoryRows(rawRows);
-    }
-  };
-
-  const draw = async () => {
-    renderShell();
-    renderTopActions();
-
-    // wire tabs
-    outlet.querySelector('#tabInventory')?.addEventListener('click', async ()=>{
-      await refresh('inventory');
-    });
-    outlet.querySelector('#tabCategories')?.addEventListener('click', async ()=>{
-      await refresh('categories');
-    });
-
-    // wire top actions
-    outlet.querySelector('#btnRefresh')?.addEventListener('click', async ()=>{
-      await refresh(view);
-    });
-
-    outlet.querySelector('#btnNewProduct')?.addEventListener('click', async ()=>{
-      // si no hay categorías, avisa
-      if(!categories.length){
-        Swal.fire('Sin categorías','Primero crea una categoría en la pestaña “Categorías”.','info');
-        return;
-      }
-      await openProductModal(null);
-    });
-
-    outlet.querySelector('#btnNewCategory')?.addEventListener('click', async ()=>{
-      await openCreateCategory();
-    });
-
-    // render view
-    if(view === 'inventory') renderInventoryTable();
-    else renderCategoriesTable();
-
-    // wire table actions (delegación)
-    outlet.addEventListener('click', onOutletClick);
-  };
-
-  const cleanup = () => {
-    outlet.removeEventListener('click', onOutletClick);
-
-    // liberar objectURL si quedó
-    if(currentPreviewObjectUrl){
-      URL.revokeObjectURL(currentPreviewObjectUrl);
-      currentPreviewObjectUrl = null;
-    }
-  };
-
-  const refresh = async (nextView) => {
-    cleanup();
-
-    view = nextView;
-    outlet.dataset.invView = view;
-
-    await loadData();
-    await draw();
-  };
-
-  /* =========================
-   *  Category CRUD (Swal)
-   *  ========================= */
-  const buildCodeFromName = (name) => {
-    return String(name || '')
-      .trim()
-      .toUpperCase()
-      .replaceAll('Á','A').replaceAll('É','E').replaceAll('Í','I').replaceAll('Ó','O').replaceAll('Ú','U').replaceAll('Ñ','N')
-      .replace(/\s+/g,'_')
-      .replace(/[^A-Z0-9_]/g,'');
-  };
-
+  /* ---------- Category CRUD (Swal) ---------- */
   const openCreateCategory = async () => {
     if(!canEdit) return;
 
@@ -652,8 +632,11 @@ export async function renderInventory(outlet){
       html: `
         <div class="text-start">
           <label class="form-label">Nombre</label>
-          <input id="swCatName" class="form-control" placeholder="Ej: Gotas, Servicios...">
-          <div class="form-text">Se recomienda nombre claro. (El code lo generamos automático)</div>
+          <input id="swCatName" class="form-control" placeholder="Ej: Micas, Bisel, Lentes de contacto...">
+          <div class="form-text">El CODE se genera automático (puedes editarlo después).</div>
+
+          <label class="form-label mt-2">Descripción (opcional)</label>
+          <input id="swCatDesc" class="form-control" placeholder="Opcional">
         </div>
       `,
       focusConfirm: false,
@@ -661,58 +644,82 @@ export async function renderInventory(outlet){
       confirmButtonText: 'Guardar',
       preConfirm: ()=>{
         const name = document.getElementById('swCatName')?.value?.trim() || '';
-        if(!name) {
+        const description = document.getElementById('swCatDesc')?.value?.trim() || '';
+        if(!name){
           Swal.showValidationMessage('El nombre es obligatorio');
           return false;
         }
-        return { name };
+        return { name, description };
       }
     });
 
     if(!r.isConfirmed) return;
 
     try{
-      // backend típico: { name } (si tu API pide code también, lo agregamos)
-      const payload = { name: r.value.name, code: buildCodeFromName(r.value.name) };
-      await inventoryService.createCategory(payload);
+      const code = buildCodeFromName(r.value.name);
+      await inventoryService.createCategory({
+        code,
+        name: r.value.name,
+        description: r.value.description || null
+      });
       Swal.fire('Listo','Categoría creada.','success');
       await refresh('categories');
     }catch(e){
       console.error(e);
-      Swal.fire('Error','No se pudo crear la categoría.','error');
+      Swal.fire('Error', extractAxiosErrorMessage(e), 'error');
     }
   };
 
   const openEditCategory = async (catId) => {
     if(!canEdit) return;
 
-    const cat = categories.find(x => String(x.id) === String(catId));
-    const currentName = cat?.name ?? cat?.label ?? '';
+    const cat = (categories || []).find(x => String(x.id) === String(catId));
+    const currentName = pickCategoryName(cat);
+    const currentCode = pickCategoryCode(cat);
+    const currentDesc = cat?.description ?? '';
 
     const r = await Swal.fire({
       title: 'Editar categoría',
-      input: 'text',
-      inputLabel: 'Nombre',
-      inputValue: currentName,
+      html: `
+        <div class="text-start">
+          <label class="form-label">CODE</label>
+          <input id="swCatCode" class="form-control" value="${safe(currentCode)}" placeholder="Ej: MICAS">
+
+          <label class="form-label mt-2">Nombre</label>
+          <input id="swCatName" class="form-control" value="${safe(currentName)}" placeholder="Ej: Micas">
+
+          <label class="form-label mt-2">Descripción (opcional)</label>
+          <input id="swCatDesc" class="form-control" value="${safe(currentDesc)}" placeholder="Opcional">
+        </div>
+      `,
+      focusConfirm: false,
       showCancelButton: true,
       confirmButtonText: 'Guardar',
-      inputValidator: (v)=>{
-        if(!String(v||'').trim()) return 'El nombre es obligatorio';
-        return null;
+      preConfirm: ()=>{
+        const code = document.getElementById('swCatCode')?.value?.trim() || '';
+        const name = document.getElementById('swCatName')?.value?.trim() || '';
+        const description = document.getElementById('swCatDesc')?.value?.trim() || '';
+        if(!code || !name){
+          Swal.showValidationMessage('CODE y Nombre son obligatorios');
+          return false;
+        }
+        return { code, name, description };
       }
     });
 
     if(!r.isConfirmed) return;
 
     try{
-      const name = String(r.value || '').trim();
-      const payload = { name, code: buildCodeFromName(name) };
-      await inventoryService.updateCategory(catId, payload);
+      await inventoryService.updateCategory(catId, {
+        code: r.value.code,
+        name: r.value.name,
+        description: r.value.description || null
+      });
       Swal.fire('Listo','Categoría actualizada.','success');
       await refresh('categories');
     }catch(e){
       console.error(e);
-      Swal.fire('Error','No se pudo actualizar la categoría.','error');
+      Swal.fire('Error', extractAxiosErrorMessage(e), 'error');
     }
   };
 
@@ -735,13 +742,11 @@ export async function renderInventory(outlet){
       await refresh('categories');
     }catch(e){
       console.error(e);
-      Swal.fire('Error','No se pudo borrar la categoría.','error');
+      Swal.fire('Error', extractAxiosErrorMessage(e), 'error');
     }
   };
 
-  /* =========================
-   *  Inventory actions
-   *  ========================= */
+  /* ---------- Inventory actions ---------- */
   const addStock = async (productId) => {
     if(!canEdit) return;
 
@@ -768,7 +773,7 @@ export async function renderInventory(outlet){
       await refresh('inventory');
     }catch(e){
       console.error(e);
-      Swal.fire('Error','No se pudo actualizar el stock.','error');
+      Swal.fire('Error', extractAxiosErrorMessage(e), 'error');
     }
   };
 
@@ -790,26 +795,106 @@ export async function renderInventory(outlet){
       await refresh('inventory');
     }catch(e){
       console.error(e);
-      Swal.fire('Error','No se pudo eliminar el producto.','error');
+      Swal.fire('Error', extractAxiosErrorMessage(e), 'error');
     }
   };
 
-  /* =========================
-   *  Outlet click delegator
-   *  ========================= */
+  /* ---------- Load / Draw / Refresh ---------- */
+  const loadData = async () => {
+    // categorías siempre
+    try{
+      const cats = await inventoryService.listCategories();
+      categories = Array.isArray(cats) ? cats : [];
+    }catch(e){
+      console.warn('No se pudieron cargar categorías:', e);
+      categories = [];
+    }
+
+    // inventario solo si toca
+    if(view === 'inventory'){
+      const raw = await inventoryService.list();
+      inventoryRows = normalizeInventoryRows(raw);
+
+      // mejora: si no viene label pero sí categoryId, resolver name por categories
+      const map = new Map((categories || []).map(c => [String(c.id), pickCategoryName(c)]));
+      inventoryRows = inventoryRows.map(r=>{
+        const p = r.product || {};
+        if(!p.categoryLabel && p.categoryId && map.has(String(p.categoryId))){
+          p.categoryLabel = map.get(String(p.categoryId));
+        }
+        return r;
+      });
+    }
+  };
+
+  const draw = async () => {
+    renderShell();
+    if(canEdit) renderTopActions();
+
+    // tabs
+    outlet.querySelector('#tabInventory')?.addEventListener('click', async ()=>{
+      await refresh('inventory');
+    });
+
+    outlet.querySelector('#tabCategories')?.addEventListener('click', async ()=>{
+      await refresh('categories');
+    });
+
+    // top actions
+    outlet.querySelector('#btnRefresh')?.addEventListener('click', async ()=>{
+      await refresh(view);
+    });
+
+    outlet.querySelector('#btnNewProduct')?.addEventListener('click', async ()=>{
+      if(!categories.length){
+        Swal.fire('Sin categorías','Primero crea una categoría en “Categorías”.','info');
+        return;
+      }
+      await openProductModal(null);
+    });
+
+    outlet.querySelector('#btnNewCategory')?.addEventListener('click', async ()=>{
+      await openCreateCategory();
+    });
+
+    // render view
+    if(view === 'inventory') renderInventoryTable();
+    else renderCategoriesTable();
+
+    // delegación de clicks
+    outlet.addEventListener('click', onOutletClick);
+  };
+
+  const cleanup = () => {
+    // quitar delegación para no duplicar
+    outlet.removeEventListener('click', onOutletClick);
+
+    // liberar objectURL
+    if(currentPreviewObjectUrl){
+      URL.revokeObjectURL(currentPreviewObjectUrl);
+      currentPreviewObjectUrl = null;
+    }
+  };
+
+  const refresh = async (nextView) => {
+    cleanup();
+    view = nextView;
+    outlet.dataset.invView = view;
+    await loadData();
+    await draw();
+  };
+
+  /* ---------- Delegación: botones tabla ---------- */
   async function onOutletClick(e){
     const t = e.target;
 
     // INVENTARIO
-    const addStockId = t?.dataset?.addstock;
-    const editId = t?.dataset?.edit;
-    const delId = t?.dataset?.del;
-
     if(view === 'inventory'){
-      if(addStockId){
-        await addStock(addStockId);
-        return;
-      }
+      const addStockId = t?.dataset?.addstock;
+      const editId = t?.dataset?.edit;
+      const delId = t?.dataset?.del;
+
+      if(addStockId){ await addStock(addStockId); return; }
       if(editId){
         const p = inventoryRows.map(r=>r.product).find(x=>String(x?.id)===String(editId));
         if(!p){
@@ -819,31 +904,20 @@ export async function renderInventory(outlet){
         await openProductModal(p);
         return;
       }
-      if(delId){
-        await deleteProduct(delId);
-        return;
-      }
+      if(delId){ await deleteProduct(delId); return; }
     }
 
     // CATEGORÍAS
-    const catEditId = t?.dataset?.catEdit;
-    const catDelId = t?.dataset?.catDel;
-
     if(view === 'categories'){
-      if(catEditId){
-        await openEditCategory(catEditId);
-        return;
-      }
-      if(catDelId){
-        await deleteCategory(catDelId);
-        return;
-      }
+      const catEditId = t?.dataset?.catEdit;
+      const catDelId = t?.dataset?.catDel;
+
+      if(catEditId){ await openEditCategory(catEditId); return; }
+      if(catDelId){ await deleteCategory(catDelId); return; }
     }
   }
 
-  /* =========================
-   *  Init
-   *  ========================= */
+  /* ---------- Init ---------- */
   await loadData();
   await draw();
 }
