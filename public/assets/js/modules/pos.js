@@ -1,31 +1,35 @@
+// public/assets/js/pages/pos.js (FULL - FINAL)
+// - Carga products + inventory
+// - Cards + tabla stock (DataTables)
+// - Imágenes protegidas con api.getBlob() (manda token)
+// - Cache de objectURL
+// - Descuentos por pedido o por item (como tu versión)
+// - Evita navegación accidental a /api/sales (type="button" + preventDefault)
+
 import { api } from '../services/api.js';
 import { money } from '../utils/helpers.js';
 import { authService } from '../services/authService.js';
 
 let cart = [];
 
+// cache: productId -> objectURL o placeholder
+const imageUrlCache = new Map();
+
 export async function renderPOS(outlet){
   const role = authService.getRole();
+  const token = authService.getToken();
   const isOptica = role === 'optica';
 
   const CRITICAL_STOCK = 3;
 
-  const { data: products } = await api.get('/products');
-  const { data: inventory } = await api.get('/inventory');
-
-  const stockById = new Map(
-    (inventory || []).map(r => [Number(r?.product?.id), Number(r?.stock ?? 0)])
-  );
-
-  const getStock = (productId) => Number(stockById.get(Number(productId)) ?? 0);
-  const getCartQty = (productId) =>
-    Number(cart.find(x => Number(x.id) === Number(productId))?.qty ?? 0);
-
+  /* ===================== Helpers ===================== */
   const safe = (v)=> String(v ?? '')
     .replaceAll('&','&amp;')
     .replaceAll('<','&lt;')
     .replaceAll('>','&gt;')
     .replaceAll('"','&quot;');
+
+  const clampPct = (n)=> Math.min(100, Math.max(0, Number(n || 0)));
 
   const warnNoStock = (name='Producto')=>{
     Swal.fire({
@@ -35,8 +39,6 @@ export async function renderPOS(outlet){
       confirmButtonText: 'Entendido'
     });
   };
-
-  const clampPct = (n)=> Math.min(100, Math.max(0, Number(n || 0)));
 
   const stockBadge = (st)=>{
     if(st <= 0) return `<span class="badge text-bg-secondary">Sin stock</span>`;
@@ -66,8 +68,6 @@ export async function renderPOS(outlet){
       </svg>
     `);
 
-  const getImageUrl = (p)=> (p.imageUrl || p.image_url || p.imageBase64 || PLACEHOLDER_IMG);
-
   const fmtGrad = (g)=>{
     if(!g) return '—';
     const sph = (g.sph ?? '').toString().trim();
@@ -84,20 +84,72 @@ export async function renderPOS(outlet){
     return `Eje: <b>${safe(axis || '—')}</b>${notes ? `<br/>Notas: <b>${safe(notes)}</b>` : ''}`;
   };
 
-  // ===================== FILTROS / UI =====================
+  /* ===================== Load API ===================== */
+  const [{ data: products }, { data: inventory }] = await Promise.all([
+    api.get('/products'),
+    api.get('/inventory'),
+  ]);
+
+  // inventory puede venir:
+  // A) plano: [{id, sku, name, stock, sale_price...}]
+  // B) joined: [{product:{id,...}, stock}]
+  const stockById = new Map(
+    (inventory || []).map(r=>{
+      const pid = Number(r?.product?.id ?? r?.id);
+      const st = Number(r?.stock ?? 0);
+      return [pid, st];
+    })
+  );
+
+  const getStock = (productId) => Number(stockById.get(Number(productId)) ?? 0);
+
+  const getCartQty = (productId) =>
+    Number(cart.find(x => Number(x.id) === Number(productId))?.qty ?? 0);
+
+  /* ===================== Images (protected) ===================== */
+  async function getProtectedImageUrl(productId){
+    const pid = Number(productId);
+
+    if(imageUrlCache.has(pid)) return imageUrlCache.get(pid);
+
+    if(!token){
+      imageUrlCache.set(pid, PLACEHOLDER_IMG);
+      return PLACEHOLDER_IMG;
+    }
+
+    try{
+      const blob = await api.getBlob(`/products/${pid}/image`); // ✅ manda Authorization
+      const url = URL.createObjectURL(blob);
+      imageUrlCache.set(pid, url);
+      return url;
+    }catch(e){
+      imageUrlCache.set(pid, PLACEHOLDER_IMG);
+      return PLACEHOLDER_IMG;
+    }
+  }
+
+  async function hydrateImages(container){
+    const imgs = container.querySelectorAll('img[data-imgpid]');
+    const tasks = [];
+    for(const img of imgs){
+      const pid = img.dataset.imgpid;
+      tasks.push((async ()=>{
+        const url = await getProtectedImageUrl(pid);
+        img.src = url || PLACEHOLDER_IMG;
+      })());
+    }
+    await Promise.allSettled(tasks);
+  }
+
+  /* ===================== Filters / Discounts ===================== */
   const categories = Array.from(new Set((products || []).map(p => p.category).filter(Boolean))).sort();
   let selectedCategory = 'ALL';
   let searchQuery = '';
 
-  // ✅ descuentos: modo + valor
   let discountMode = 'order'; // 'order' | 'item'
   let orderDiscountPct = 0;
 
-  const getOrderDiscountPct = ()=>{
-    if(isOptica) return 0;
-    return clampPct(orderDiscountPct);
-  };
-
+  /* ===================== UI ===================== */
   outlet.innerHTML = `
     <div class="d-flex align-items-center justify-content-between mb-3">
       <h4 class="mb-0">Catálogo</h4>
@@ -107,7 +159,7 @@ export async function renderPOS(outlet){
       <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between">
         <div class="d-flex flex-wrap gap-2 align-items-center" id="posCategories">
           <button class="btn btn-sm btn-brand" data-cat="ALL">Todos</button>
-          ${categories.map(c=>`<button class="btn btn-sm btn-outline-brand" data-cat="${c}">${c}</button>`).join('')}
+          ${categories.map(c=>`<button class="btn btn-sm btn-outline-brand" data-cat="${safe(c)}">${safe(c)}</button>`).join('')}
         </div>
 
         <div class="input-group" style="max-width:420px;">
@@ -138,6 +190,7 @@ export async function renderPOS(outlet){
             `
         }
         <div class="small text-muted">Stock crítico = ≤ ${CRITICAL_STOCK}</div>
+        ${!token ? `<div class="small text-warning">⚠️ Sin token: no se cargarán imágenes protegidas.</div>` : ``}
       </div>
     </div>
 
@@ -167,18 +220,18 @@ export async function renderPOS(outlet){
                 </tr>
               </thead>
               <tbody>
-                ${inventory.map(r=>{
-                  const p = r.product || {};
-                  const st = Number(r.stock ?? 0);
+                ${(inventory || []).map(r=>{
+                  const p = r.product || r;
+                  const st = Number(r.stock ?? p.stock ?? 0);
                   return `
                     <tr class="${st<=CRITICAL_STOCK ? 'table-warning' : ''}">
-                      <td>${p.sku||''}</td>
-                      <td>${p.name||''}</td>
-                      <td class="small text-muted">${p.category||''}</td>
-                      <td class="small text-muted">${p.type||''}</td>
+                      <td>${safe(p.sku||'')}</td>
+                      <td>${safe(p.name||'')}</td>
+                      <td class="small text-muted">${safe(p.category||'')}</td>
+                      <td class="small text-muted">${safe(p.type||'')}</td>
                       <td class="fw-semibold">${st}</td>
                       <td>${stockBadge(st)}</td>
-                      <td>${money(p.salePrice ?? 0)}</td>
+                      <td>${money(p.salePrice ?? p.sale_price ?? 0)}</td>
                     </tr>
                   `;
                 }).join('')}
@@ -200,14 +253,12 @@ export async function renderPOS(outlet){
           </div>
 
           ${
-            isOptica
-              ? ''
-              : `
-                <div class="d-flex justify-content-between">
-                  <div>Descuento</div>
-                  <div class="fw-bold" id="cartDiscount">$0</div>
-                </div>
-              `
+            isOptica ? '' : `
+              <div class="d-flex justify-content-between">
+                <div>Descuento</div>
+                <div class="fw-bold" id="cartDiscount">$0</div>
+              </div>
+            `
           }
 
           <div class="d-flex justify-content-between">
@@ -229,7 +280,7 @@ export async function renderPOS(outlet){
             <input id="customerName" class="form-control" placeholder="Nombre del cliente">
           </div>
 
-          <button id="btnCheckout" class="btn btn-brand w-100 mt-3" disabled>
+          <button id="btnCheckout" type="button" class="btn btn-brand w-100 mt-3" disabled>
             Cobrar
           </button>
 
@@ -264,7 +315,6 @@ export async function renderPOS(outlet){
   const btnCheckout = outlet.querySelector('#btnCheckout');
   const checkoutHint = outlet.querySelector('#checkoutHint');
 
-  // ===================== DESCUENTOS =====================
   const discountModeSel = isOptica ? null : outlet.querySelector('#discountMode');
   const orderDiscountInp = isOptica ? null : outlet.querySelector('#orderDiscount');
   const orderDiscountHint = isOptica ? null : outlet.querySelector('#orderDiscountHint');
@@ -282,7 +332,7 @@ export async function renderPOS(outlet){
     return catOk && qOk;
   };
 
-  const renderCards = ()=>{
+  const renderCards = async ()=>{
     const filtered = (products || []).filter(matchesFilter);
     countEl.textContent = `${filtered.length} producto(s)`;
 
@@ -303,14 +353,18 @@ export async function renderPOS(outlet){
       return `
         <div class="col-12 col-sm-6 col-xl-4">
           <div class="card h-100 ${critical ? 'border-warning' : ''}">
-            <img
-              src="${getImageUrl(p)}"
-              alt="${safe(p.name||'Producto')}"
-              class="card-img-top"
-              style="height:140px; object-fit:cover;"
-              loading="lazy"
-              onerror="this.onerror=null; this.src='${PLACEHOLDER_IMG}';"
-            />
+
+            <!-- ✅ Imagen adaptada a cuadro -->
+            <div style="width:100%; aspect-ratio: 16/10; overflow:hidden; background:#f8f9fa;">
+              <img
+                src="${PLACEHOLDER_IMG}"
+                data-imgpid="${p.id}"
+                alt="${safe(p.name||'Producto')}"
+                style="width:100%; height:100%; object-fit:cover; display:block;"
+                loading="lazy"
+              />
+            </div>
+
             <div class="card-body d-flex flex-column">
               <div class="d-flex align-items-start justify-content-between gap-2">
                 <div class="fw-semibold" style="white-space: normal; overflow: visible;">
@@ -328,7 +382,7 @@ export async function renderPOS(outlet){
               </div>
 
               <div class="mt-2 d-flex align-items-center justify-content-between">
-                <div class="fw-bold">${money(p.salePrice ?? 0)}</div>
+                <div class="fw-bold">${money(p.salePrice ?? p.sale_price ?? 0)}</div>
                 <div class="small ${critical ? 'text-danger' : 'text-muted'}">
                   Stock: <b>${st}</b>
                 </div>
@@ -351,9 +405,10 @@ export async function renderPOS(outlet){
         </div>
       `;
     }).join('');
+
+    await hydrateImages(grid);
   };
 
-  // ===================== DETALLE PRODUCTO =====================
   const showProductDetails = async (p)=>{
     const st = getStock(p.id);
     const desc = (p.description ?? '').toString().trim();
@@ -374,24 +429,25 @@ export async function renderPOS(outlet){
     const buyPriceHtml = isOptica ? '' : `
       <div class="col-6">
         <div class="small text-muted">Precio compra</div>
-        <div class="fw-semibold">${money(p.buyPrice ?? 0)}</div>
+        <div class="fw-semibold">${money(p.buyPrice ?? p.buy_price ?? 0)}</div>
       </div>
     `;
+
+    const imgUrl = imageUrlCache.get(Number(p.id)) || PLACEHOLDER_IMG;
 
     const html = `
       <div class="text-start">
         <div class="d-flex gap-3 align-items-start">
           <img
-            src="${getImageUrl(p)}"
+            src="${imgUrl}"
             alt="${safe(p.name)}"
             style="width:120px;height:120px;object-fit:cover;border-radius:12px;border:1px solid #e9ecef;"
-            onerror="this.onerror=null; this.src='${PLACEHOLDER_IMG}';"
           />
           <div style="min-width:0;">
             <div class="fw-bold">${safe(p.name)}</div>
             <div class="small text-muted">${safe(p.sku)}</div>
             <div class="mt-1">${stockBadge(st)} <span class="small text-muted ms-2">Stock: <b>${st}</b></span></div>
-            <div class="mt-2 fw-bold">${money(p.salePrice ?? 0)}</div>
+            <div class="mt-2 fw-bold">${money(p.salePrice ?? p.sale_price ?? 0)}</div>
           </div>
         </div>
 
@@ -425,7 +481,7 @@ export async function renderPOS(outlet){
       </div>
     `;
 
-    await Swal.fire({
+    const r = await Swal.fire({
       title: 'Detalle del producto',
       html,
       width: 720,
@@ -433,16 +489,14 @@ export async function renderPOS(outlet){
       confirmButtonText: 'Agregar al carrito',
       cancelButtonText: 'Cerrar',
       focusConfirm: false
-    }).then(r=>{
-      if(r.isConfirmed){
-        addToCart(p);
-      }
     });
+
+    if(r.isConfirmed) addToCart(p);
   };
 
-  // ===================== CARRITO + DESCUENTO =====================
+  /* ===================== Totals / Cart ===================== */
   const calcTotals = ()=>{
-    const subtotal = cart.reduce((a,i)=> a + (Number(i.salePrice||0) * Number(i.qty||0)), 0);
+    const subtotal = cart.reduce((a,i)=> a + (Number(i.salePrice||i.sale_price||0) * Number(i.qty||0)), 0);
 
     if(isOptica){
       return { subtotal, discountAmount: 0, total: subtotal, orderDiscountPct: 0 };
@@ -459,7 +513,7 @@ export async function renderPOS(outlet){
     let discountAmount = 0;
     for(const it of cart){
       const pct = clampPct(it.itemDiscountPct || 0);
-      discountAmount += (Number(it.salePrice||0) * Number(it.qty||0)) * (pct/100);
+      discountAmount += (Number(it.salePrice||it.sale_price||0) * Number(it.qty||0)) * (pct/100);
     }
     const total = subtotal - discountAmount;
     return { subtotal, discountAmount, total, orderDiscountPct: 0 };
@@ -500,16 +554,16 @@ export async function renderPOS(outlet){
         <div class="d-flex justify-content-between border rounded p-2 mb-2">
           <div style="min-width:0;">
             <div class="fw-semibold">${safe(it.name)}</div>
-            <div class="small text-muted">${safe(it.sku)} · ${money(it.salePrice)} · Stock: ${st}</div>
+            <div class="small text-muted">${safe(it.sku)} · ${money(it.salePrice ?? it.sale_price ?? 0)} · Stock: ${st}</div>
             ${st<=CRITICAL_STOCK && st>0 ? `<div class="small text-danger">Stock crítico</div>` : ``}
             ${itemDisc}
           </div>
 
           <div class="d-flex gap-2 align-items-center">
-            <button class="btn btn-sm btn-outline-secondary" data-dec="${it.id}">-</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-dec="${it.id}">-</button>
             <div class="fw-bold">${it.qty}</div>
-            <button class="btn btn-sm btn-outline-secondary" data-inc="${it.id}" ${atLimit?'disabled':''}>+</button>
-            <button class="btn btn-sm btn-outline-danger" data-del="${it.id}">x</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-inc="${it.id}" ${atLimit?'disabled':''}>+</button>
+            <button type="button" class="btn btn-sm btn-outline-danger" data-del="${it.id}">x</button>
           </div>
         </div>
       `;
@@ -536,13 +590,20 @@ export async function renderPOS(outlet){
     if(found){
       found.qty++;
     }else{
-      cart.push({ ...p, qty: 1, itemDiscountPct: 0 });
+      cart.push({
+        ...p,
+        salePrice: p.salePrice ?? p.sale_price ?? 0,
+        buyPrice: p.buyPrice ?? p.buy_price ?? 0,
+        qty: 1,
+        itemDiscountPct: 0
+      });
     }
+
     renderCart();
     return true;
   };
 
-  // ===================== EVENTOS =====================
+  /* ===================== Events ===================== */
   outlet.addEventListener('click', (e)=>{
     const addId = e.target?.dataset?.add;
     const detailsId = e.target?.dataset?.details;
@@ -578,10 +639,7 @@ export async function renderPOS(outlet){
       const it = cart.find(x=>String(x.id)===String(incId));
       if(it){
         const st = getStock(it.id);
-        if(st <= 0 || it.qty + 1 > st){
-          warnNoStock(it.name);
-          return;
-        }
+        if(st <= 0 || it.qty + 1 > st){ warnNoStock(it.name); return; }
         it.qty++;
         renderCart();
       }
@@ -604,13 +662,12 @@ export async function renderPOS(outlet){
     }
   });
 
-  // búsqueda
-  outlet.querySelector('#posSearch').addEventListener('input', (e)=>{
+  outlet.querySelector('#posSearch')?.addEventListener('input', (e)=>{
     searchQuery = String(e.target.value || '');
     renderCards();
   });
 
-  // ✅ descuento: modo + pedido
+  // descuentos
   if(!isOptica){
     discountModeSel.addEventListener('change', ()=>{
       discountMode = discountModeSel.value === 'item' ? 'item' : 'order';
@@ -623,7 +680,6 @@ export async function renderPOS(outlet){
         orderDiscountInp.disabled = true;
       }
 
-      // mostrar/ocultar inputs por item
       outlet.querySelectorAll('[data-itemdiscbox]').forEach(box=>{
         box.classList.toggle('d-none', discountMode !== 'item');
       });
@@ -639,7 +695,6 @@ export async function renderPOS(outlet){
       renderCart();
     });
 
-    // input descuento por item (delegado)
     outlet.addEventListener('input', (e)=>{
       const pid = e.target?.dataset?.itemdisc;
       if(!pid) return;
@@ -653,9 +708,12 @@ export async function renderPOS(outlet){
   }
 
   // checkout
-  outlet.querySelector('#btnCheckout').addEventListener('click', async ()=>{
+  outlet.querySelector('#btnCheckout')?.addEventListener('click', async (e)=>{
+    e.preventDefault();
+
     if(cart.length === 0) return;
 
+    // valida stock al momento de cobrar
     for(const it of cart){
       if(it.qty > getStock(it.id)){
         warnNoStock(it.name);
@@ -667,7 +725,6 @@ export async function renderPOS(outlet){
     const customerName = outlet.querySelector('#customerName').value || 'Mostrador';
 
     const t = calcTotals();
-
     const discTxt = isOptica
       ? '—'
       : (discountMode === 'order'
@@ -684,14 +741,19 @@ export async function renderPOS(outlet){
 
     if(!ok.isConfirmed) return;
 
+    // ✅ POST correcto (nunca GET)
     await api.post('/sales',{
-      items: cart,
+      items: cart.map(i=>({
+        id: i.id,
+        qty: i.qty,
+        salePrice: Number(i.salePrice ?? i.sale_price ?? 0),
+        itemDiscountPct: Number(i.itemDiscountPct ?? 0),
+      })),
       method,
       customerName,
       subtotal: t.subtotal,
       discountMode: isOptica ? 'none' : discountMode,
       orderDiscountPct: isOptica ? 0 : (discountMode==='order' ? t.orderDiscountPct : 0),
-      itemDiscounts: isOptica ? [] : (discountMode==='item' ? cart.map(i=>({ productId: i.id, pct: clampPct(i.itemDiscountPct||0) })) : []),
       discountAmount: t.discountAmount,
       total: t.total
     });
@@ -701,12 +763,11 @@ export async function renderPOS(outlet){
     Swal.fire('Venta registrada','Proceso completado.','success');
   });
 
-  // init
-  renderCards();
+  /* ===================== Init ===================== */
+  await renderCards();
   renderCart();
   setCheckoutState();
 
-  // inicializa modo descuento (si aplica)
   if(!isOptica){
     discountModeSel.dispatchEvent(new Event('change'));
   }

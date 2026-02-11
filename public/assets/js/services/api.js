@@ -53,12 +53,12 @@ class ApiService {
   const url = this.baseURL.replace(/\/$/,'') + path;
 
   const res = await fetch(url, {
-    method: 'GET',
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      Accept: 'application/octet-stream'
-    },
-  });
+  method: 'GET',
+  headers: {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    'Accept': 'application/json'
+  },
+});
 
   if(res.status === 401){
     authService.logout();
