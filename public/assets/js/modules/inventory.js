@@ -99,12 +99,53 @@ function extractAxiosErrorMessage(err){
  * ========================= */
 function normalizeInventoryRows(rows){
   const arr = Array.isArray(rows) ? rows : [];
-  const looksFlat = arr.length && (
+
+  // ✅ Tu backend actual regresa:
+  // [{ stock, critical, product:{...}, variants:[...] }]
+  // Entonces si existe "product", NO es flat.
+  const isWrapped = arr.length && arr[0] && typeof arr[0] === 'object'
+    && Object.prototype.hasOwnProperty.call(arr[0], 'product');
+
+  if(isWrapped){
+    return arr.map(r=>{
+      const p = r.product || {};
+      return {
+        stock: Number(r.stock ?? 0),
+        critical: Boolean(r.critical ?? false),
+        product: {
+          id: p.id,
+          sku: p.sku ?? '',
+          name: p.name ?? '',
+          description: p.description ?? '',
+          // ✅ tus campos reales
+          categoryCode: p.category ?? '',
+          categoryLabel: p.category_label ?? p.categoryLabel ?? '',
+          categoryId: p.category_id ?? p.categoryId ?? null,
+
+          supplier: p.supplier ?? p.supplier_name ?? '',
+          minStock: Number(p.minStock ?? p.min_stock ?? 0),
+          maxStock: (p.maxStock ?? p.max_stock ?? null),
+
+          buyPrice: Number(p.buyPrice ?? p.buy_price ?? 0),
+          salePrice: Number(p.salePrice ?? p.sale_price ?? 0),
+
+          imageUrl: p.imageUrl ?? null,
+
+          // por si luego lo usas
+          variants: Array.isArray(r.variants) ? r.variants : (Array.isArray(p.variants) ? p.variants : []),
+        },
+        variants: Array.isArray(r.variants) ? r.variants : []
+      };
+    });
+  }
+
+  // ✅ “flat” REAL: productos vienen en raíz sin "product"
+  const looksFlat = arr.length && arr[0] && typeof arr[0] === 'object' && !arr[0].product && (
     Object.prototype.hasOwnProperty.call(arr[0], 'sku') ||
-    Object.prototype.hasOwnProperty.call(arr[0], 'stock') ||
+    Object.prototype.hasOwnProperty.call(arr[0], 'name') ||
+    Object.prototype.hasOwnProperty.call(arr[0], 'category_id') ||
     Object.prototype.hasOwnProperty.call(arr[0], 'sale_price') ||
-    Object.prototype.hasOwnProperty.call(arr[0], 'buy_price') ||
-    Object.prototype.hasOwnProperty.call(arr[0], 'category_id')
+    Object.prototype.hasOwnProperty.call(arr[0], 'buy_price')
   );
 
   if(looksFlat){
@@ -140,28 +181,8 @@ function normalizeInventoryRows(rows){
     });
   }
 
-  // fallback mock viejo
-  return arr.map(r=>{
-    const p = r.product || {};
-    return {
-      stock: Number(r.stock ?? 0),
-      critical: Boolean(r.critical ?? false),
-      product: {
-        id: p.id,
-        sku: p.sku ?? '',
-        name: p.name ?? '',
-        description: p.description ?? '',
-        categoryLabel: p.category ?? '',
-        categoryId: p.category_id ?? p.categoryId ?? null,
-        supplier: p.supplier ?? '',
-        minStock: Number(p.minStock ?? p.min_stock ?? 0),
-        maxStock: p.maxStock ?? p.max_stock ?? null,
-        buyPrice: Number(p.buyPrice ?? p.buy_price ?? 0),
-        salePrice: Number(p.salePrice ?? p.sale_price ?? 0),
-        variants: Array.isArray(p.variants) ? p.variants : [],
-      }
-    };
-  });
+  // fallback
+  return [];
 }
 
 /* =========================

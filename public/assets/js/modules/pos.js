@@ -1,10 +1,10 @@
-// public/assets/js/pages/pos.js (FULL - FINAL)
-// - Carga products + inventory
-// - Cards + tabla stock (DataTables)
-// - Imágenes protegidas con api.getBlob() (manda token)
-// - Cache de objectURL
-// - Descuentos por pedido o por item (como tu versión)
-// - Evita navegación accidental a /api/sales (type="button" + preventDefault)
+// public/assets/js/pages/pos.js (FULL - UPDATED)
+// - Recarga products + inventory después de una venta (cards + tabla) ✅
+// - OPTICA: NO muestra input cliente, usa customer_id = users.id y customer_name = users.name ✅
+// - ADMIN/EMPLOYEE: 2 inputs (hidden id + visible name) + autocomplete robusto ✅
+// - DEBUG: console.logs para detectar por qué no autocompleta ✅
+// - Mantiene payload nuevo (payment_method_id, items[].product_id, unit_price, etc.) ✅
+// - Refresh inventory table: DataTables destroy -> render -> init ✅
 
 import { api } from '../services/api.js';
 import { money } from '../utils/helpers.js';
@@ -16,9 +16,14 @@ let cart = [];
 const imageUrlCache = new Map();
 
 export async function renderPOS(outlet){
+  // ✅ DEBUG helper
+  const DBG = (...args)=> console.log('%cPOS_DEBUG', 'color:#7E57C2;font-weight:bold', ...args);
+
   const role = authService.getRole();
   const token = authService.getToken();
   const isOptica = role === 'optica';
+
+  DBG('renderPOS start', { role, isOptica, hasToken: !!token });
 
   const CRITICAL_STOCK = 3;
 
@@ -84,27 +89,91 @@ export async function renderPOS(outlet){
     return `Eje: <b>${safe(axis || '—')}</b>${notes ? `<br/>Notas: <b>${safe(notes)}</b>` : ''}`;
   };
 
-  /* ===================== Load API ===================== */
-  const [{ data: products }, { data: inventory }] = await Promise.all([
-    api.get('/products'),
-    api.get('/inventory'),
-  ]);
+  /* ===================== payment_methods mapping ===================== */
+  // ⚠️ AJUSTA estos IDs a los reales de tu tabla payment_methods
+  const PAYMENT_METHOD_ID = { cash: 1, card: 2, transfer: 3 };
 
-  // inventory puede venir:
-  // A) plano: [{id, sku, name, stock, sale_price...}]
-  // B) joined: [{product:{id,...}, stock}]
-  const stockById = new Map(
-    (inventory || []).map(r=>{
-      const pid = Number(r?.product?.id ?? r?.id);
-      const st = Number(r?.stock ?? 0);
-      return [pid, st];
-    })
-  );
+  const resolvePaymentMethodId = (methodKey)=>{
+    const id = PAYMENT_METHOD_ID[String(methodKey || '').toLowerCase()];
+    return Number(id || 0);
+  };
+
+  /* ===================== Estado recargable ===================== */
+  let products = [];
+  let inventory = [];
+  let stockById = new Map();
+
+  // customers (autocomplete) solo admin/employee (son users con role_id=3)
+  let customers = [];
+  let selectedCustomer = null; // {id, name}
+
+  // optica context (para rol optica) -> customer_id = user.id, customer_name = user.name
+  let opticaUserContext = { id: null, name: null };
+
+  const buildStockMap = ()=>{
+    stockById = new Map(
+      (inventory || []).map(r=>{
+        const pid = Number(r?.product?.id ?? r?.id);
+        const st = Number(r?.stock ?? 0);
+        return [pid, st];
+      })
+    );
+  };
 
   const getStock = (productId) => Number(stockById.get(Number(productId)) ?? 0);
 
   const getCartQty = (productId) =>
     Number(cart.find(x => Number(x.id) === Number(productId))?.qty ?? 0);
+
+  /* ===================== Load API ===================== */
+  async function loadCore(){
+    DBG('loadCore -> /products + /inventory');
+    const res = await Promise.all([
+      api.get('/products'),
+      api.get('/inventory'),
+    ]);
+    products = res[0].data || [];
+    inventory = res[1].data || [];
+    buildStockMap();
+    DBG('loadCore done', { productsCount: products.length, inventoryCount: inventory.length });
+  }
+
+  async function loadCustomersIfNeeded(){
+    if(isOptica) return;
+    // Este endpoint debe regresar users role_id=3 con {id,name,email,phone}
+    try{
+      DBG('loadCustomersIfNeeded -> /opticas');
+      const { data } = await api.get('/opticas');
+      customers = Array.isArray(data) ? data : [];
+      DBG('loadCustomersIfNeeded ok', {
+        customersCount: customers.length,
+        sample: customers?.[0] ?? null,
+        keys: customers?.[0] ? Object.keys(customers[0]) : []
+      });
+    }catch(e){
+      customers = [];
+      DBG('loadCustomersIfNeeded ERROR', { message: e?.message, status: e?.response?.status, data: e?.response?.data });
+    }
+  }
+
+  async function loadOpticaUserContextIfNeeded(){
+    if(!isOptica) return;
+    // Para rol optica, el customer es el mismo usuario (users.id/users.name)
+    try{
+      DBG('loadOpticaUserContextIfNeeded -> /me');
+      const { data: me } = await api.get('/me');
+      const uid = Number(me?.user?.id || 0);
+      const uname = String(me?.user?.name || '').trim();
+      opticaUserContext = { id: uid || null, name: uname || null };
+      DBG('opticaUserContext', opticaUserContext);
+    }catch(e){
+      opticaUserContext = { id: null, name: null };
+      DBG('loadOpticaUserContextIfNeeded ERROR', { message: e?.message, status: e?.response?.status, data: e?.response?.data });
+    }
+  }
+
+  await loadCore();
+  await Promise.all([loadCustomersIfNeeded(), loadOpticaUserContextIfNeeded()]);
 
   /* ===================== Images (protected) ===================== */
   async function getProtectedImageUrl(productId){
@@ -118,7 +187,7 @@ export async function renderPOS(outlet){
     }
 
     try{
-      const blob = await api.getBlob(`/products/${pid}/image`); // ✅ manda Authorization
+      const blob = await api.getBlob(`/products/${pid}/image`);
       const url = URL.createObjectURL(blob);
       imageUrlCache.set(pid, url);
       return url;
@@ -219,23 +288,7 @@ export async function renderPOS(outlet){
                   <th>Precio</th>
                 </tr>
               </thead>
-              <tbody>
-                ${(inventory || []).map(r=>{
-                  const p = r.product || r;
-                  const st = Number(r.stock ?? p.stock ?? 0);
-                  return `
-                    <tr class="${st<=CRITICAL_STOCK ? 'table-warning' : ''}">
-                      <td>${safe(p.sku||'')}</td>
-                      <td>${safe(p.name||'')}</td>
-                      <td class="small text-muted">${safe(p.category||'')}</td>
-                      <td class="small text-muted">${safe(p.type||'')}</td>
-                      <td class="fw-semibold">${st}</td>
-                      <td>${stockBadge(st)}</td>
-                      <td>${money(p.salePrice ?? p.sale_price ?? 0)}</td>
-                    </tr>
-                  `;
-                }).join('')}
-              </tbody>
+              <tbody id="posStockTbody"></tbody>
             </table>
           </div>
         </div>
@@ -252,14 +305,12 @@ export async function renderPOS(outlet){
             <div class="fw-bold" id="cartSubtotal">$0</div>
           </div>
 
-          ${
-            isOptica ? '' : `
-              <div class="d-flex justify-content-between">
-                <div>Descuento</div>
-                <div class="fw-bold" id="cartDiscount">$0</div>
-              </div>
-            `
-          }
+          ${ isOptica ? '' : `
+            <div class="d-flex justify-content-between">
+              <div>Descuento</div>
+              <div class="fw-bold" id="cartDiscount">$0</div>
+            </div>
+          `}
 
           <div class="d-flex justify-content-between">
             <div>Total</div>
@@ -273,12 +324,34 @@ export async function renderPOS(outlet){
               <option value="card">Tarjeta</option>
               <option value="transfer">Transferencia</option>
             </select>
+            <div class="small text-muted mt-1">*Si falla, revisa PAYMENT_METHOD_ID en pos.js</div>
           </div>
 
-          <div class="mt-3">
-            <label class="form-label">Cliente</label>
-            <input id="customerName" class="form-control" placeholder="Nombre del cliente">
-          </div>
+          ${
+            isOptica
+              ? `
+                <div class="mt-3">
+                  <label class="form-label">Cliente</label>
+                  <div class="form-control bg-light" id="opticaCustomerBox">
+                    ${safe(opticaUserContext.name || 'Óptica')}
+                  </div>
+                  <div class="small text-muted mt-1">Se registrará automáticamente como cliente.</div>
+                </div>
+              `
+              : `
+                <div class="mt-3 position-relative">
+                  <label class="form-label">Cliente</label>
+                  <!-- ✅ hidden input para id -->
+                  <input type="hidden" id="customerId" value="" />
+                  <!-- ✅ visible input para nombre -->
+                  <input id="customerName" class="form-control" placeholder="Buscar óptica..." autocomplete="off">
+                  <div id="customerSuggest" class="list-group position-absolute w-100"
+                       style="z-index:2000; display:none; max-height:240px; overflow:auto;">
+                  </div>
+                  <div class="small text-muted mt-1">Empieza a escribir para ver sugerencias.</div>
+                </div>
+              `
+          }
 
           <button id="btnCheckout" type="button" class="btn btn-brand w-100 mt-3" disabled>
             Cobrar
@@ -292,24 +365,6 @@ export async function renderPOS(outlet){
     </div>
   `;
 
-  // DataTables stock
-  if(window.$ && $.fn.dataTable){
-    if($.fn.DataTable.isDataTable('#tblPosStock')){
-      $('#tblPosStock').DataTable().destroy();
-    }
-    $('#tblPosStock').DataTable({
-      pageLength: 8,
-      order: [[4,'asc']],
-      language: {
-        search: "Buscar:",
-        lengthMenu: "Mostrar _MENU_",
-        info: "Mostrando _START_ a _END_ de _TOTAL_",
-        paginate: { previous: "Anterior", next: "Siguiente" },
-        zeroRecords: "No hay registros"
-      }
-    });
-  }
-
   const grid = outlet.querySelector('#productsGrid');
   const countEl = outlet.querySelector('#posCount');
   const btnCheckout = outlet.querySelector('#btnCheckout');
@@ -318,6 +373,15 @@ export async function renderPOS(outlet){
   const discountModeSel = isOptica ? null : outlet.querySelector('#discountMode');
   const orderDiscountInp = isOptica ? null : outlet.querySelector('#orderDiscount');
   const orderDiscountHint = isOptica ? null : outlet.querySelector('#orderDiscountHint');
+
+  DBG('DOM refs', {
+    grid: !!grid,
+    countEl: !!countEl,
+    btnCheckout: !!btnCheckout,
+    customerName: !!outlet.querySelector('#customerName'),
+    customerId: !!outlet.querySelector('#customerId'),
+    customerSuggest: !!outlet.querySelector('#customerSuggest')
+  });
 
   const setCheckoutState = ()=>{
     const empty = cart.length === 0;
@@ -331,6 +395,55 @@ export async function renderPOS(outlet){
     const qOk = !q || String(p.sku||'').toLowerCase().includes(q) || String(p.name||'').toLowerCase().includes(q);
     return catOk && qOk;
   };
+
+  function renderStockTableBody(){
+    const tbody = outlet.querySelector('#posStockTbody');
+    tbody.innerHTML = (inventory || []).map(r=>{
+      const p = r.product || r;
+      const st = Number(r.stock ?? p.stock ?? 0);
+      return `
+        <tr class="${st<=CRITICAL_STOCK ? 'table-warning' : ''}">
+          <td>${safe(p.sku||'')}</td>
+          <td>${safe(p.name||'')}</td>
+          <td class="small text-muted">${safe(p.category||'')}</td>
+          <td class="small text-muted">${safe(p.type||'')}</td>
+          <td class="fw-semibold">${st}</td>
+          <td>${stockBadge(st)}</td>
+          <td>${money(p.salePrice ?? p.sale_price ?? 0)}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  function ensureDataTable(){
+    if(!(window.$ && $.fn.dataTable)) return;
+
+    if($.fn.DataTable.isDataTable('#tblPosStock')){
+      $('#tblPosStock').DataTable().destroy();
+    }
+
+    $('#tblPosStock').DataTable({
+      pageLength: 8,
+      order: [[4,'asc']],
+      language: {
+        search: "Buscar:",
+        lengthMenu: "Mostrar _MENU_",
+        info: "Mostrando _START_ a _END_ de _TOTAL_",
+        paginate: { previous: "Anterior", next: "Siguiente" },
+        zeroRecords: "No hay registros"
+      }
+    });
+  }
+
+  function refreshInventoryTable(){
+    DBG('refreshInventoryTable()');
+    if(window.$ && $.fn.dataTable && $.fn.DataTable.isDataTable('#tblPosStock')){
+      DBG('refreshInventoryTable: destroying DT');
+      $('#tblPosStock').DataTable().destroy();
+    }
+    renderStockTableBody();
+    ensureDataTable();
+  }
 
   const renderCards = async ()=>{
     const filtered = (products || []).filter(matchesFilter);
@@ -353,8 +466,6 @@ export async function renderPOS(outlet){
       return `
         <div class="col-12 col-sm-6 col-xl-4">
           <div class="card h-100 ${critical ? 'border-warning' : ''}">
-
-            <!-- ✅ Imagen adaptada a cuadro -->
             <div style="width:100%; aspect-ratio: 16/10; overflow:hidden; background:#f8f9fa;">
               <img
                 src="${PLACEHOLDER_IMG}"
@@ -389,8 +500,8 @@ export async function renderPOS(outlet){
               </div>
 
               <div class="mt-3 d-flex gap-2">
-                <button class="btn btn-brand flex-grow-1" data-add="${p.id}" ${disabled}>Agregar</button>
-                <button class="btn btn-outline-brand btn-sm" data-details="${p.id}" title="Ver detalles">
+                <button type="button" class="btn btn-brand flex-grow-1" data-add="${p.id}" ${disabled}>Agregar</button>
+                <button type="button" class="btn btn-outline-brand btn-sm" data-details="${p.id}" title="Ver detalles">
                   Detalles
                 </button>
               </div>
@@ -603,6 +714,208 @@ export async function renderPOS(outlet){
     return true;
   };
 
+  /* ===================== Autocomplete (admin/employee) ===================== */
+  /* ===================== Autocomplete (admin/employee) ===================== */
+function mountCustomerAutocomplete(){
+  if(isOptica) return;
+
+  const input = outlet.querySelector('#customerName');
+  const hidden = outlet.querySelector('#customerId'); // ✅ hidden id
+  const box = outlet.querySelector('#customerSuggest');
+
+  DBG('mountCustomerAutocomplete()', {
+    hasInput: !!input,
+    hasHidden: !!hidden,
+    hasBox: !!box,
+    customersCount: customers.length,
+    customersSample: customers?.[0] ?? null,
+    customersKeys: customers?.[0] ? Object.keys(customers[0]) : []
+  });
+
+  if(!input || !hidden || !box) return;
+
+  // ✅ TU DATA REAL (según logs):
+  // { user_id, customer_name, email, phone, customer_id(null) }
+  const getId = (c)=>{
+    const n = Number(c?.user_id || 0);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  const getName = (c)=> String(c?.customer_name || c?.name || '').trim();
+
+  const getMeta = (c)=>{
+    const email = c?.email ? `· ${c.email}` : '';
+    const phone = c?.phone ? `· ${c.phone}` : '';
+    return `${email} ${phone}`.trim();
+  };
+
+  const hide = ()=>{ box.style.display = 'none'; box.innerHTML = ''; };
+  const show = ()=>{ box.style.display = 'block'; };
+
+  const pick = (c)=>{
+    const id = getId(c);
+    const name = getName(c);
+
+    DBG('pick() attempt', { resolvedId: id, resolvedName: name, raw: c });
+
+    if(!id){
+      DBG('pick() BLOCKED -> id inválido', { raw: c });
+      return;
+    }
+
+    selectedCustomer = { id, name };
+    hidden.value = String(id);
+    input.value = name;
+
+    DBG('pick() OK', { hiddenNow: hidden.value, visibleNow: input.value, selectedCustomer });
+
+    hide();
+  };
+
+  const renderList = (matches)=>{
+    box.innerHTML = matches.map((c, idx)=>{
+      const id = getId(c);
+      const name = getName(c);
+      const meta = getMeta(c);
+
+      return `
+        <button type="button"
+                class="list-group-item list-group-item-action"
+                data-custid="${id ?? ''}"
+                data-idx="${idx}">
+          <div class="fw-semibold">${safe(name || '(Sin nombre)')}</div>
+          ${meta ? `<div class="small text-muted">${safe(meta)}</div>` : ''}
+        </button>
+      `;
+    }).join('');
+    show();
+  };
+
+  const filterMatches = ()=>{
+    // si el usuario escribe, se invalida selección
+    selectedCustomer = null;
+    hidden.value = '';
+
+    const q = String(input.value || '').trim().toLowerCase();
+    DBG('autocomplete input', { q });
+
+    if(!q || customers.length === 0){
+      hide();
+      return [];
+    }
+
+    const matches = customers
+      .filter(c=>{
+        const name = getName(c).toLowerCase();
+        const email = String(c?.email || '').toLowerCase();
+        const phone = String(c?.phone || '').toLowerCase();
+        return name.includes(q) || email.includes(q) || phone.includes(q);
+      })
+      .slice(0, 10);
+
+    DBG('autocomplete matches', {
+      matchesCount: matches.length,
+      sample: matches?.[0] ?? null,
+      sampleResolvedId: matches?.[0] ? getId(matches[0]) : null
+    });
+
+    if(matches.length === 0){
+      hide();
+      return [];
+    }
+
+    renderList(matches);
+    return matches;
+  };
+
+  input.addEventListener('input', filterMatches);
+
+  input.addEventListener('focus', ()=>{
+    if(String(input.value || '').trim().length > 0) filterMatches();
+  });
+
+  const handlePickFromEvent = (e, kind)=>{
+    const btn = e.target?.closest('[data-custid]');
+    if(!btn) return;
+
+    e.preventDefault(); // ✅ evita blur antes del pick
+
+    const datasetId = btn.dataset.custid;
+    const id = Number(datasetId);
+
+    DBG(`suggest ${kind}`, { datasetId, id });
+
+    if(!Number.isFinite(id) || id <= 0){
+      // fallback por idx
+      const idx = Number(btn.dataset.idx);
+      const c = customers?.[idx];
+      DBG(`suggest ${kind} fallback idx`, { idx, found: !!c, resolvedId: c ? getId(c) : null });
+      if(c) pick(c);
+      return;
+    }
+
+    const c = customers.find(x => getId(x) === id);
+    DBG(`suggest ${kind} find by id`, { id, found: !!c });
+    if(c) pick(c);
+  };
+
+  // ✅ mousedown para seleccionar antes del blur
+  box.addEventListener('mousedown', (e)=> handlePickFromEvent(e, 'mousedown'));
+  // fallback click por si acaso
+  box.addEventListener('click', (e)=> handlePickFromEvent(e, 'click'));
+
+  // ✅ cerrar con delay
+  input.addEventListener('blur', ()=>{
+    setTimeout(()=> hide(), 150);
+  });
+
+  // ✅ teclado
+  input.addEventListener('keydown', (e)=>{
+    if(box.style.display === 'none') return;
+
+    const items = Array.from(box.querySelectorAll('[data-idx]'));
+    if(items.length === 0) return;
+
+    const active = box.querySelector('.active');
+    let idx = active ? Number(active.dataset.idx) : -1;
+
+    if(e.key === 'ArrowDown'){
+      e.preventDefault();
+      idx = Math.min(items.length - 1, idx + 1);
+      items.forEach(x=>x.classList.remove('active'));
+      items[idx].classList.add('active');
+      items[idx].scrollIntoView({ block: 'nearest' });
+    }
+
+    if(e.key === 'ArrowUp'){
+      e.preventDefault();
+      idx = Math.max(0, idx - 1);
+      items.forEach(x=>x.classList.remove('active'));
+      items[idx].classList.add('active');
+      items[idx].scrollIntoView({ block: 'nearest' });
+    }
+
+    if(e.key === 'Enter'){
+      if(idx >= 0){
+        e.preventDefault();
+        const id = Number(items[idx].dataset.custid);
+        const c = customers.find(x => getId(x) === id);
+        DBG('keyboard enter', { idx, id, found: !!c });
+        if(c) pick(c);
+      }
+    }
+
+    if(e.key === 'Escape'){
+      hide();
+    }
+  });
+
+  if(customers.length === 0){
+    console.warn('[POS] customers vacío. Revisa /opticas.');
+  }
+}
+
+
   /* ===================== Events ===================== */
   outlet.addEventListener('click', (e)=>{
     const addId = e.target?.dataset?.add;
@@ -707,13 +1020,11 @@ export async function renderPOS(outlet){
     });
   }
 
-  // checkout
+  /* ===================== CHECKOUT (payload nuevo + roles) ===================== */
   outlet.querySelector('#btnCheckout')?.addEventListener('click', async (e)=>{
     e.preventDefault();
-
     if(cart.length === 0) return;
 
-    // valida stock al momento de cobrar
     for(const it of cart){
       if(it.qty > getStock(it.id)){
         warnNoStock(it.name);
@@ -721,19 +1032,114 @@ export async function renderPOS(outlet){
       }
     }
 
-    const method = outlet.querySelector('#payMethod').value;
-    const customerName = outlet.querySelector('#customerName').value || 'Mostrador';
+    const methodKey = outlet.querySelector('#payMethod').value;
+    const payment_method_id = resolvePaymentMethodId(methodKey);
+    if(!payment_method_id){
+      Swal.fire('Método inválido','Configura PAYMENT_METHOD_ID en pos.js con los IDs reales.','warning');
+      return;
+    }
+
+    // ===== Cliente según rol =====
+    let customer_id = null;
+    let customer_name = 'Mostrador';
+
+    if(isOptica){
+      customer_id = Number(opticaUserContext.id || 0) || null;
+      customer_name = String(opticaUserContext.name || 'Óptica').trim();
+      if(!customer_id){
+        Swal.fire('Falta usuario','No se pudo obtener tu user.id desde /me.','warning');
+        return;
+      }
+    }else{
+      const input = outlet.querySelector('#customerName');
+      const hidden = outlet.querySelector('#customerId'); // ✅
+      const typed = String(input?.value || '').trim();
+      const hid = Number(hidden?.value || 0);
+
+      DBG('checkout customer (admin)', { typed, hiddenValue: hidden?.value, selectedCustomer });
+
+      if(hid){
+        customer_id = hid;
+        customer_name = typed || 'Mostrador';
+      }else if(selectedCustomer?.id){
+        customer_id = Number(selectedCustomer.id);
+        customer_name = String(selectedCustomer.name || typed || 'Mostrador').trim();
+      }else{
+        customer_id = null;
+        customer_name = typed || 'Mostrador';
+      }
+    }
 
     const t = calcTotals();
+
+    // sales.discount_type: none|order_pct|order_amount
+    let discount_type = 'none';
+    let discount_value = 0;
+
+    if(!isOptica && discountMode === 'order'){
+      const pct = clampPct(orderDiscountPct);
+      discount_type = pct > 0 ? 'order_pct' : 'none';
+      discount_value = pct > 0 ? pct : 0;
+    }
+
+    // sale_items payload
+    const items = cart.map(it=>{
+      const qty = Number(it.qty || 0);
+      const unit_price = Number(it.salePrice ?? it.sale_price ?? 0);
+      const line_subtotal = qty * unit_price;
+
+      let item_discount_type = 'none';
+      let item_discount_value = 0;
+      let item_discount_amount = 0;
+
+      if(!isOptica && discountMode === 'item'){
+        const pct = clampPct(it.itemDiscountPct || 0);
+        if(pct > 0){
+          item_discount_type = 'pct';
+          item_discount_value = pct;
+          item_discount_amount = line_subtotal * (pct/100);
+        }
+      }
+
+      const line_total = line_subtotal - item_discount_amount;
+
+      return {
+        product_id: Number(it.id),
+        variant_id: it.variant_id ? Number(it.variant_id) : null,
+        qty,
+        unit_price,
+        line_subtotal,
+        item_discount_type,
+        item_discount_value,
+        item_discount_amount,
+        line_total,
+        axis: it.axis ?? null,
+        item_notes: it.item_notes ?? null
+      };
+    });
+
+    const payload = {
+      customer_id,
+      customer_name,
+      payment_method_id,
+      discount_type,
+      discount_value,
+      subtotal: Number(t.subtotal),
+      discount_amount: Number(t.discountAmount),
+      total: Number(t.total),
+      notes: null,
+      items
+    };
+
     const discTxt = isOptica
       ? '—'
       : (discountMode === 'order'
-          ? `${t.orderDiscountPct}% (pedido)`
+          ? `${discount_value}% (pedido)`
           : 'Por producto');
 
     const ok = await Swal.fire({
       title:'Confirmar venta',
-      html:`Cliente: <b>${safe(customerName)}</b><br>Total: <b>${money(t.total)}</b><br>Descuento: <b>${safe(discTxt)}</b><br>Pago: <b>${safe(method)}</b>`,
+      html:`Cliente: <b>${safe(customer_name)}</b><br>Total: <b>${money(payload.total)}</b><br>Descuento: <b>${safe(discTxt)}</b><br>Pago: <b>${safe(methodKey)}</b>`,
       icon:'question',
       showCancelButton:true,
       confirmButtonText:'Procesar'
@@ -741,34 +1147,42 @@ export async function renderPOS(outlet){
 
     if(!ok.isConfirmed) return;
 
-    // ✅ POST correcto (nunca GET)
-    await api.post('/sales',{
-      items: cart.map(i=>({
-        id: i.id,
-        qty: i.qty,
-        salePrice: Number(i.salePrice ?? i.sale_price ?? 0),
-        itemDiscountPct: Number(i.itemDiscountPct ?? 0),
-      })),
-      method,
-      customerName,
-      subtotal: t.subtotal,
-      discountMode: isOptica ? 'none' : discountMode,
-      orderDiscountPct: isOptica ? 0 : (discountMode==='order' ? t.orderDiscountPct : 0),
-      discountAmount: t.discountAmount,
-      total: t.total
-    });
+    try{
+      await api.post('/sales', payload);
 
-    cart = [];
-    renderCart();
-    Swal.fire('Venta registrada','Proceso completado.','success');
+      // ✅ limpiar carrito
+      cart = [];
+      selectedCustomer = null;
+      const hid = outlet.querySelector('#customerId');
+      if(hid) hid.value = '';
+      renderCart();
+
+      // ✅ RECARGA products+inventory y vuelve a pintar cards+tabla (DataTables safe)
+      await loadCore();
+      refreshInventoryTable();
+      await renderCards();
+
+      Swal.fire('Venta registrada','Proceso completado.','success');
+    }catch(err){
+      const msg = err?.response?.data?.message || err?.message || 'Error al registrar la venta';
+      const details = err?.response?.data?.errors
+        ? Object.values(err.response.data.errors).flat().map(x=>`• ${x}`).join('<br>')
+        : '';
+      Swal.fire('Error', details || msg, 'error');
+    }
   });
 
   /* ===================== Init ===================== */
+  renderStockTableBody();
+  ensureDataTable();
   await renderCards();
   renderCart();
   setCheckoutState();
 
   if(!isOptica){
     discountModeSel.dispatchEvent(new Event('change'));
+    mountCustomerAutocomplete();
   }
+
+  DBG('renderPOS end');
 }

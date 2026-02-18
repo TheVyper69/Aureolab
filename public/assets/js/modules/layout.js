@@ -4,16 +4,23 @@ export function renderLayout(){
   const role = authService.getRole();
   const user = authService.getUser() || { name: 'Usuario' };
 
+  // ✅ POS solo para óptica
   const links = [
-    { hash: '#/pos',       label: 'Catálogo',    roles: ['admin','employee','optica'] },
+    { hash: '#/pos',       label: 'Catálogo',          roles: ['optica'] },
     { hash: '#/inventory', label: 'Inventario',        roles: ['admin','employee'] },
     { hash: '#/sales',     label: 'Ventas / Reportes', roles: ['admin'] },
     { hash: '#/users',     label: 'Usuarios',          roles: ['admin'] },
     { hash: '#/opticas',   label: 'Ópticas',           roles: ['admin'] },
-    { hash: '#/orders',    label: 'Pedidos',           roles: ['optica','employee','admin'] } // ✅
+    { hash: '#/orders',    label: 'Pedidos',           roles: ['optica','employee','admin'] }
   ].filter(l => l.roles.includes(role));
 
-  const current = location.hash || '#/pos';
+  // ✅ default por rol
+  const defaultHash =
+    role === 'optica' ? '#/pos'
+    : (role === 'admin' || role === 'employee') ? '#/inventory'
+    : '#/login';
+
+  const current = location.hash || defaultHash;
 
   return `
   <div class="container-fluid">
@@ -23,9 +30,9 @@ export function renderLayout(){
         <i class="bi bi-list"></i>
       </button>
 
-      <img 
-        src="assets/images/logo.png" 
-        alt="Logo" 
+      <img
+        src="assets/images/logo.png"
+        alt="Logo"
         class="header-logo"
       />
 
@@ -36,9 +43,9 @@ export function renderLayout(){
       <!-- SIDEBAR -->
       <aside class="sidebar col-12 col-lg-2 p-2" id="sidebar">
         <div class="p-3 text-center">
-          <img 
-            src="assets/images/logo.png" 
-            alt="Logo" 
+          <img
+            src="assets/images/logo.png"
+            alt="Logo"
             class="sidebar-logo mb-2"
           />
           <div>

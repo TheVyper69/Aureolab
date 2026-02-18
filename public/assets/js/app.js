@@ -16,7 +16,7 @@ const routes = {
   '#/login': async (root) => renderLogin(root),
   '#/register': async (root) => renderRegister(root),
 
-  '#/pos': renderPOS,
+  '#/pos': renderPOS, // ✅ solo óptica (controlado en requireRole)
   '#/inventory': renderInventory,
   '#/sales': renderSales,
   '#/users': renderUsers,
@@ -35,35 +35,49 @@ function requireAuth(hash) {
   return true;
 }
 
+function defaultRouteByRole(role){
+  if(role === 'optica') return '#/pos';
+  if(role === 'admin' || role === 'employee') return '#/inventory';
+  return '#/login';
+}
+
 function requireRole(hash) {
   const role = authService.getRole();
 
   // Admin-only
   const adminOnly = ['#/users', '#/opticas', '#/sales'];
 
-  // ✅ Óptica allowed
+  // ✅ Óptica allowed (POS + pedidos)
   const opticaAllowed = ['#/pos', '#/orders'];
 
-  // ✅ Employee allowed (ahora también #/orders)
-  const employeeAllowed = ['#/pos', '#/inventory', '#/orders'];
+  // ✅ Employee allowed (SIN POS)
+  const employeeAllowed = ['#/inventory', '#/orders'];
 
   // --- ADMIN-ONLY ---
   if (adminOnly.includes(hash) && role !== 'admin') {
     Swal.fire('Acceso restringido', 'Solo administradores.', 'warning');
-    location.hash = role === 'optica' ? '#/orders' : '#/pos';
+    location.hash = defaultRouteByRole(role);
     return false;
   }
 
   // --- ÓPTICA ---
   if (role === 'optica' && !opticaAllowed.includes(hash)) {
-    location.hash = '#/orders';
+    location.hash = defaultRouteByRole(role);
     return false;
   }
 
   // --- EMPLEADO ---
   if (role === 'employee' && !employeeAllowed.includes(hash)) {
-    Swal.fire('Acceso restringido', 'Tu rol solo permite POS, Inventario y Pedidos.', 'warning');
-    location.hash = '#/pos';
+    Swal.fire('Acceso restringido', 'Tu rol solo permite Inventario y Pedidos.', 'warning');
+    location.hash = defaultRouteByRole(role);
+    return false;
+  }
+
+  // --- ADMIN ---
+  // (admin puede entrar a inventory/orders/etc; POS NO)
+  if (role === 'admin' && hash === '#/pos') {
+    Swal.fire('Acceso restringido', 'El POS/Catálogo es solo para Ópticas.', 'warning');
+    location.hash = defaultRouteByRole(role);
     return false;
   }
 
@@ -80,7 +94,7 @@ async function navigate() {
       return;
     }
     const role = authService.getRole();
-    location.hash = (role === 'optica') ? '#/orders' : '#/pos';
+    location.hash = defaultRouteByRole(role);
     return;
   }
 
