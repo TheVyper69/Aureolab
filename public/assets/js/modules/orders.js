@@ -30,18 +30,13 @@ function safe(v){
     .replaceAll('"','&quot;');
 }
 
-async function loadOpticasDb(){
-  const db = await (await fetch('../api/mock-data.json', { cache: 'no-store' })).json();
-  return db?.opticas || [];
-}
-
 function buildProductMap(products){
   const m = new Map();
   (products || []).forEach(p => m.set(String(p.id), p));
   return m;
 }
 
-/* ====== update helper (mock-friendly) ====== */
+/* ====== update helper (real API / mock-friendly) ====== */
 async function updateOrderPatch(orderId, patch){
   if (typeof ordersService.update === 'function') return await ordersService.update(orderId, patch);
   if (typeof ordersService.patch === 'function') return await ordersService.patch(orderId, patch);
@@ -50,11 +45,64 @@ async function updateOrderPatch(orderId, patch){
   return null;
 }
 
+/* =========================
+   NORMALIZACIÓN (backend-friendly)
+   Soporta:
+   - DTO camelCase: paymentStatus/processStatus/opticaId/date/items[]
+   - DB snake_case: payment_status/process_status/optica_id/created_at/order_items[]
+   ========================= */
 function normalizeOrder(o){
+  if(!o) return o;
+
+  const paymentStatus = o.paymentStatus ?? o.payment_status ?? 'pendiente';
+  const processStatus = o.processStatus ?? o.process_status ?? 'en_proceso';
+
+  const date = o.date ?? o.created_at ?? o.createdAt ?? null;
+
+  const opticaId = o.opticaId ?? o.optica_id ?? null;
+
+  const paymentMethod =
+    o.paymentMethod ??
+    o.payment_method ??
+    o.payment_method_code ??
+    o.payment_method_id ??
+    o.paymentMethodCode ??
+    null;
+
+  const createdByName = o.createdByName ?? o.created_by_name ?? o.createdBy?.name ?? null;
+  const createdByEmail = o.createdByEmail ?? o.created_by_email ?? o.createdBy?.email ?? null;
+  const createdByRole = o.createdByRole ?? o.created_by_role ?? o.createdBy?.role ?? o.createdBy?.role?.name ?? null;
+
+  const subtotal = Number(o.subtotal ?? o.sub_total ?? 0);
+  const total = Number(o.total ?? 0);
+
+  const rawItems = o.items ?? o.order_items ?? o.items_list ?? [];
+  const items = Array.isArray(rawItems) ? rawItems.map(it=>{
+    return {
+      productId: it.productId ?? it.product_id ?? it.product?.id ?? null,
+      qty: Number(it.qty ?? it.quantity ?? 0),
+      price: Number(it.price ?? it.unit_price ?? it.unitPrice ?? 0),
+      variantId: it.variantId ?? it.variant_id ?? null,
+      axis: it.axis ?? null,
+      itemNotes: it.itemNotes ?? it.item_notes ?? null,
+    };
+  }) : [];
+
   return {
     ...o,
-    paymentStatus: o.paymentStatus || 'pendiente',
-    processStatus: o.processStatus || 'en_proceso'
+    id: o.id,
+    date,
+    opticaId,
+    paymentMethod,
+    paymentStatus,
+    processStatus,
+    createdByName,
+    createdByEmail,
+    createdByRole,
+    subtotal,
+    total,
+    items,
+    notes: o.notes ?? o.note ?? null
   };
 }
 
@@ -67,11 +115,50 @@ function badgeHtml(type, value){
   return `<span class="badge ${PROCESS_BADGE[v] || 'text-bg-secondary'}">${safe(PROCESS_LABEL[v] || v)}</span>`;
 }
 
+/* =========================
+   OPTICAS MAP (real API)
+   /opticas suele devolver:
+   { optica_id, customer_id, customer_name, email, phone, user_id }
+   ========================= */
+async function loadOpticasIndex(){
+  try{
+    const { data } = await api.get('/opticas');
+    const arr = Array.isArray(data) ? data : [];
+
+    // key por optica_id (opticas.id) => coincide con orders.optica_id
+    const byId = new Map(
+      arr.map(o => [
+        String(o.optica_id ?? o.id),
+        {
+          optica_id: o.optica_id ?? o.id,
+          customer_id: o.customer_id ?? null,
+          nombre: o.customer_name ?? o.nombre ?? o.name ?? 'Óptica',
+          email: o.email ?? null,
+          phone: o.phone ?? null,
+          user_id: o.user_id ?? null
+        }
+      ])
+    );
+
+    return { list: arr, byId };
+  }catch(e){
+    console.warn('[orders] /opticas no disponible o falló:', e?.response?.status || e?.message);
+    return { list: [], byId: new Map() };
+  }
+}
+
+/* =========================
+   DETAIL MODAL
+   ========================= */
 async function showOrderDetail(order, productsMap, opticasById, ctx){
   const role = ctx?.role || authService.getRole();
   const o = normalizeOrder(order);
 
-  const opticaName = opticasById.get(String(o.opticaId))?.nombre || `Óptica #${o.opticaId || '—'}`;
+  const opticaName =
+    opticasById.get(String(o.opticaId))?.nombre ||
+    o.opticaName ||
+    `Óptica #${o.opticaId || '—'}`;
+
   const createdBy = o.createdByName || o.createdByEmail || '—';
   const createdRole = o.createdByRole || '—';
 
@@ -88,20 +175,27 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
 
   const items = (o.items || []).map(it=>{
     const p = productsMap.get(String(it.productId)) || {};
-    const line = (Number(it.qty||0) * Number(it.price||0));
+    const unit = Number(it.price || 0);
+    const qty = Number(it.qty || 0);
+    const line = qty * unit;
+
     return `
       <tr>
-        <td>${safe(p.sku || it.productId)}</td>
+        <td>${safe(p.sku || it.productId || '—')}</td>
         <td>${safe(p.name || 'Producto')}</td>
-        <td class="text-end">${Number(it.qty||0)}</td>
-        <td class="text-end">${money(it.price||0)}</td>
+        <td class="text-end">${qty}</td>
+        <td class="text-end">${money(unit)}</td>
         <td class="text-end fw-semibold">${money(line)}</td>
       </tr>
     `;
   }).join('') || `<tr><td colspan="5" class="text-muted">Sin items</td></tr>`;
 
+  // Método pago: si backend manda código (cash/card/transfer) se etiqueta; si manda id, se muestra tal cual
+  const pmKey = (typeof o.paymentMethod === 'string') ? o.paymentMethod : String(o.paymentMethod || '');
+  const pmLabel = PM_LABEL[pmKey] || pmKey || '—';
+
   const controlsHtml = (role === 'optica')
-    ? '' // ✅ óptica solo ve detalle, no cambia estatus
+    ? '' // óptica solo ve detalle
     : `
       <div class="mt-3 p-3 border rounded bg-light">
         <div class="fw-semibold mb-2">Cambios de estatus</div>
@@ -170,7 +264,7 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
         </div>
         <div class="col-6">
           <div class="small text-muted">Pago (método)</div>
-          <div class="fw-semibold">${safe(PM_LABEL[o.paymentMethod] || o.paymentMethod || '—')}</div>
+          <div class="fw-semibold">${safe(pmLabel)}</div>
         </div>
 
         <div class="col-6">
@@ -227,7 +321,6 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
     icon: 'info',
     confirmButtonText: 'Cerrar',
     didOpen: () => {
-      // Óptica no cambia nada
       if(role === 'optica') return;
 
       const btn = Swal.getHtmlContainer()?.querySelector('#btnSaveStatus');
@@ -275,14 +368,22 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
         });
         if(!confirm.isConfirmed) return;
 
+        // Backend-friendly patch (snake_case)
         const patch = {};
-        if(nextPay !== paySt) patch.paymentStatus = nextPay;
-        if(nextProc !== procSt) patch.processStatus = nextProc;
+        if(nextPay !== paySt) patch.payment_status = nextPay;
+        if(nextProc !== procSt) patch.process_status = nextProc;
+
+        // También mandamos camelCase por compatibilidad (por si tu service lo espera)
+        const patchCompat = {};
+        if(nextPay !== paySt) patchCompat.paymentStatus = nextPay;
+        if(nextProc !== procSt) patchCompat.processStatus = nextProc;
 
         try{
-          await updateOrderPatch(o.id, patch);
-          if(typeof ctx?.onLocalUpdate === 'function') ctx.onLocalUpdate(o.id, patch);
-          Swal.fire('Listo', 'Estatus actualizado (mock).', 'success');
+          await updateOrderPatch(o.id, { ...patch, ...patchCompat });
+
+          if(typeof ctx?.onLocalUpdate === 'function') ctx.onLocalUpdate(o.id, { ...patchCompat });
+
+          Swal.fire('Listo', 'Estatus actualizado.', 'success');
         }catch(err){
           console.error(err);
           Swal.fire('Error', 'No se pudo actualizar el estatus.', 'error');
@@ -293,43 +394,54 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
 }
 
 /* =========================
-   VISTA ÓPTICA (SIN FORMULARIO)
+   VISTA ÓPTICA (mis pedidos + stock lectura)
    ========================= */
 async function renderOpticaOrders(outlet){
-  const { data: products } = await api.get('/products');
-  const { data: inventory } = await api.get('/inventory');
+  const [{ data: products }, { data: inventory }, meRes, optRes] = await Promise.all([
+    api.get('/products'),
+    api.get('/inventory'),
+    api.get('/me'),
+    loadOpticasIndex()
+  ]);
+
+  const productsMap = buildProductMap(products);
+
+  const me = meRes?.data?.user || null;
+  const myOpticaId = Number(me?.optica_id || 0) || null;
+
+  // Pedidos desde API (idealmente ya vienen filtrados por rol)
   const allOrdersRaw = await ordersService.list();
   const allOrders = (allOrdersRaw || []).map(normalizeOrder);
 
-  const me = authService.getUser();
-  const email = (me?.email || '').toLowerCase();
-  const opticas = await loadOpticasDb();
-  const opticasById = new Map((opticas || []).map(o => [String(o.id), o]));
-
-  const optica =
-    (opticas || []).find(o => String(o.email || '').toLowerCase() === email) ||
-    (opticas || [])[0];
-
-  const opticaId = optica?.id || 1;
-
+  // Filtro extra por seguridad (si backend no filtra)
   const myOrders = allOrders
-    .filter(o => Number(o.opticaId) === Number(opticaId))
+    .filter(o => !myOpticaId || Number(o.opticaId) === Number(myOpticaId))
     .sort((a, b) => new Date(b.date) - new Date(a.date));
 
-  const productsMap = buildProductMap(products);
+  const opticasById = optRes.byId;
+
+  const opticaName =
+    opticasById.get(String(myOpticaId))?.nombre ||
+    me?.name ||
+    'Óptica';
 
   const renderMyOrdersTbody = ()=>{
     const tbody = outlet.querySelector('#tblMyOrders tbody');
     if(!tbody) return;
+
     tbody.innerHTML = myOrders.map(o=>{
       const paySt = o.paymentStatus || 'pendiente';
       const procSt = o.processStatus || 'en_proceso';
+
+      const pmKey = (typeof o.paymentMethod === 'string') ? o.paymentMethod : String(o.paymentMethod || '');
+      const pmLabel = PM_LABEL[pmKey] || pmKey || '—';
+
       return `
         <tr data-process="${procSt}">
           <td class="fw-semibold">#${o.id}</td>
           <td class="small">${formatDateTime(o.date)}</td>
-          <td>${money(o.total)}</td>
-          <td class="small">${PM_LABEL[o.paymentMethod] || o.paymentMethod}</td>
+          <td>${money(o.total || 0)}</td>
+          <td class="small">${safe(pmLabel)}</td>
           <td>${badgeHtml('payment', paySt)}</td>
           <td>${badgeHtml('process', procSt)}</td>
           <td class="text-end">
@@ -337,16 +449,19 @@ async function renderOpticaOrders(outlet){
           </td>
         </tr>
       `;
-    }).join('');
+    }).join('') || `
+      <tr>
+        <td colspan="7" class="text-muted">Aún no tienes pedidos.</td>
+      </tr>
+    `;
   };
 
   outlet.innerHTML = `
     <div class="d-flex align-items-center justify-content-between mb-3">
       <div>
-        <h4 class="mb-0">Óptica: ${optica?.nombre || 'Óptica'}</h4>
+        <h4 class="mb-0">Óptica: ${safe(opticaName)}</h4>
         <div class="text-muted small">Stock (solo lectura) + pedidos</div>
       </div>
-      <!-- ✅ ahora manda al POS -->
       <button class="btn btn-brand" id="btnGoPOS">Ir a POS</button>
     </div>
 
@@ -367,15 +482,15 @@ async function renderOpticaOrders(outlet){
                 </tr>
               </thead>
               <tbody>
-                ${inventory.map(r=>{
+                ${(inventory || []).map(r=>{
                   const p = r.product || {};
                   return `<tr>
-                    <td>${p.sku||''}</td>
-                    <td>${p.name||''}</td>
-                    <td>${r.stock ?? 0}</td>
-                    <td>${money(p.salePrice ?? 0)}</td>
-                    <td>${p.category||''}</td>
-                    <td>${p.type||''}</td>
+                    <td>${safe(p.sku||'')}</td>
+                    <td>${safe(p.name||'')}</td>
+                    <td>${Number(r.stock ?? 0)}</td>
+                    <td>${money(p.salePrice ?? p.sale_price ?? 0)}</td>
+                    <td>${safe(p.category||'')}</td>
+                    <td>${safe(p.type||'')}</td>
                   </tr>`;
                 }).join('')}
               </tbody>
@@ -387,7 +502,7 @@ async function renderOpticaOrders(outlet){
 
       <div class="col-lg-5">
         <div class="card p-3">
-          <h6 class="mb-0">Mis pedidos anteriores</h6>
+          <h6 class="mb-0">Mis pedidos</h6>
 
           <div class="row g-2 mt-2">
             <div class="col-7">
@@ -427,7 +542,6 @@ async function renderOpticaOrders(outlet){
     </div>
   `;
 
-  // ✅ botón -> POS
   outlet.querySelector('#btnGoPOS')?.addEventListener('click', ()=>{
     location.hash = '#/pos';
   });
@@ -452,11 +566,11 @@ async function renderOpticaOrders(outlet){
 
   renderMyOrdersTbody();
 
-  // filtros pedidos anteriores
+  // filtros pedidos
   const applyOrderFilter = () => {
-    const q = (document.getElementById('orderSearch').value || '').toLowerCase().trim();
-    const proc = document.getElementById('orderProcess').value;
-    const rows = Array.from(document.querySelectorAll('#tblMyOrders tbody tr'));
+    const q = (outlet.querySelector('#orderSearch')?.value || '').toLowerCase().trim();
+    const proc = outlet.querySelector('#orderProcess')?.value || '';
+    const rows = Array.from(outlet.querySelectorAll('#tblMyOrders tbody tr'));
 
     rows.forEach(r => {
       const txt = r.innerText.toLowerCase();
@@ -466,10 +580,9 @@ async function renderOpticaOrders(outlet){
     });
   };
 
-  document.getElementById('orderSearch').addEventListener('input', applyOrderFilter);
-  document.getElementById('orderProcess').addEventListener('change', applyOrderFilter);
+  outlet.querySelector('#orderSearch')?.addEventListener('input', applyOrderFilter);
+  outlet.querySelector('#orderProcess')?.addEventListener('change', applyOrderFilter);
 
-  // ver detalle (óptica solo ve)
   outlet.addEventListener('click', async (e)=>{
     const id = e.target?.dataset?.viewOrder;
     if(!id) return;
@@ -487,14 +600,17 @@ async function renderOpticaOrders(outlet){
 async function renderEmployeeOrders(outlet){
   const role = authService.getRole();
 
-  const { data: products } = await api.get('/products');
+  const [{ data: products }, optRes] = await Promise.all([
+    api.get('/products'),
+    loadOpticasIndex()
+  ]);
+
   const productsMap = buildProductMap(products);
 
   const allOrdersRaw = (await ordersService.list()) || [];
   const rows = allOrdersRaw.map(normalizeOrder).sort((a,b)=> new Date(b.date) - new Date(a.date));
 
-  const opticas = await loadOpticasDb();
-  const opticasById = new Map((opticas || []).map(o => [String(o.id), o]));
+  const opticasById = optRes.byId;
 
   const onLocalUpdate = (orderId, patch)=>{
     const idx = rows.findIndex(x=>String(x.id)===String(orderId));
@@ -510,13 +626,16 @@ async function renderEmployeeOrders(outlet){
       const paySt = o.paymentStatus || 'pendiente';
       const procSt = o.processStatus || 'en_proceso';
 
+      const pmKey = (typeof o.paymentMethod === 'string') ? o.paymentMethod : String(o.paymentMethod || '');
+      const pmLabel = PM_LABEL[pmKey] || pmKey || '—';
+
       return `
         <tr>
           <td class="fw-semibold">#${safe(o.id)}</td>
           <td class="small">${safe(formatDateTime(o.date))}</td>
           <td>${safe(optName)}</td>
           <td class="small">${safe(created)} <span class="text-muted">(${safe(createdRole)})</span></td>
-          <td class="small">${safe(PM_LABEL[o.paymentMethod] || o.paymentMethod || '—')}</td>
+          <td class="small">${safe(pmLabel)}</td>
           <td>${badgeHtml('payment', paySt)}</td>
           <td>${badgeHtml('process', procSt)}</td>
           <td class="fw-bold">${money(o.total || 0)}</td>
@@ -560,13 +679,16 @@ async function renderEmployeeOrders(outlet){
               const paySt = o.paymentStatus || 'pendiente';
               const procSt = o.processStatus || 'en_proceso';
 
+              const pmKey = (typeof o.paymentMethod === 'string') ? o.paymentMethod : String(o.paymentMethod || '');
+              const pmLabel = PM_LABEL[pmKey] || pmKey || '—';
+
               return `
                 <tr>
                   <td class="fw-semibold">#${safe(o.id)}</td>
                   <td class="small">${safe(formatDateTime(o.date))}</td>
                   <td>${safe(optName)}</td>
                   <td class="small">${safe(created)} <span class="text-muted">(${safe(createdRole)})</span></td>
-                  <td class="small">${safe(PM_LABEL[o.paymentMethod] || o.paymentMethod || '—')}</td>
+                  <td class="small">${safe(pmLabel)}</td>
                   <td>${badgeHtml('payment', paySt)}</td>
                   <td>${badgeHtml('process', procSt)}</td>
                   <td class="fw-bold">${money(o.total || 0)}</td>

@@ -1,10 +1,15 @@
 // public/assets/js/pages/pos.js (FULL - UPDATED)
 // - Recarga products + inventory después de una venta (cards + tabla) ✅
-// - OPTICA: NO muestra input cliente, usa customer_id = users.id y customer_name = users.name ✅
+// - OPTICA: NO muestra input cliente, usa customer_id = users.optica_id (desde /me) y customer_name = users.name ✅
 // - ADMIN/EMPLOYEE: 2 inputs (hidden id + visible name) + autocomplete robusto ✅
 // - DEBUG: console.logs para detectar por qué no autocompleta ✅
 // - Mantiene payload nuevo (payment_method_id, items[].product_id, unit_price, etc.) ✅
 // - Refresh inventory table: DataTables destroy -> render -> init ✅
+//
+// ✅ CAMBIO OPCIÓN 1:
+// - En lugar de POST /sales, ahora la óptica crea pedidos: POST /orders
+// - Se mantiene TODO el resto del código (UI, descuentos, detalles, etc.)
+// - El payload enviado es el de orders: { payment_method_id, notes, items[] }
 
 import { api } from '../services/api.js';
 import { money } from '../utils/helpers.js';
@@ -107,8 +112,8 @@ export async function renderPOS(outlet){
   let customers = [];
   let selectedCustomer = null; // {id, name}
 
-  // optica context (para rol optica) -> customer_id = user.id, customer_name = user.name
-  let opticaUserContext = { id: null, name: null };
+  // ✅ optica context (para rol optica)
+  let opticaUserContext = { id: null, name: null, optica_id: null };
 
   const buildStockMap = ()=>{
     stockById = new Map(
@@ -158,17 +163,33 @@ export async function renderPOS(outlet){
 
   async function loadOpticaUserContextIfNeeded(){
     if(!isOptica) return;
-    // Para rol optica, el customer es el mismo usuario (users.id/users.name)
+
     try{
       DBG('loadOpticaUserContextIfNeeded -> /me');
       const { data: me } = await api.get('/me');
-      const uid = Number(me?.user?.id || 0);
-      const uname = String(me?.user?.name || '').trim();
-      opticaUserContext = { id: uid || null, name: uname || null };
+
+      // ✅ /me devuelve { ok, user, role }
+      const u = me?.user || null;
+
+      opticaUserContext = {
+        id: Number(u?.id || 0) || null,                  // users.id (solo referencia)
+        name: String(u?.name || '').trim() || null,
+        optica_id: Number(u?.optica_id || 0) || null     // (para orders: opticas.id)
+      };
+
       DBG('opticaUserContext', opticaUserContext);
+
+      // ✅ Actualiza el UI si ya está pintado
+      const box = outlet.querySelector('#opticaCustomerBox');
+      if(box) box.textContent = opticaUserContext.name || 'Óptica';
+
     }catch(e){
-      opticaUserContext = { id: null, name: null };
-      DBG('loadOpticaUserContextIfNeeded ERROR', { message: e?.message, status: e?.response?.status, data: e?.response?.data });
+      opticaUserContext = { id: null, name: null, optica_id: null };
+      DBG('loadOpticaUserContextIfNeeded ERROR', {
+        message: e?.message,
+        status: e?.response?.status,
+        data: e?.response?.data
+      });
     }
   }
 
@@ -354,7 +375,7 @@ export async function renderPOS(outlet){
           }
 
           <button id="btnCheckout" type="button" class="btn btn-brand w-100 mt-3" disabled>
-            Cobrar
+            Crear pedido
           </button>
 
           <div class="small text-muted mt-2" id="checkoutHint">
@@ -437,7 +458,7 @@ export async function renderPOS(outlet){
 
   function refreshInventoryTable(){
     DBG('refreshInventoryTable()');
-    if(window.$ && $.fn.dataTable && $.fn.DataTable.isDataTable('#tblPosStock')){
+    if(window.$ && $.fn.datatable && $.fn.DataTable.isDataTable('#tblPosStock')){
       DBG('refreshInventoryTable: destroying DT');
       $('#tblPosStock').DataTable().destroy();
     }
@@ -715,70 +736,67 @@ export async function renderPOS(outlet){
   };
 
   /* ===================== Autocomplete (admin/employee) ===================== */
-  /* ===================== Autocomplete (admin/employee) ===================== */
-function mountCustomerAutocomplete(){
-  if(isOptica) return;
+  function mountCustomerAutocomplete(){
+    if(isOptica) return;
 
-  const input = outlet.querySelector('#customerName');
-  const hidden = outlet.querySelector('#customerId'); // ✅ hidden id
-  const box = outlet.querySelector('#customerSuggest');
+    const input = outlet.querySelector('#customerName');
+    const hidden = outlet.querySelector('#customerId'); // ✅ hidden id
+    const box = outlet.querySelector('#customerSuggest');
 
-  DBG('mountCustomerAutocomplete()', {
-    hasInput: !!input,
-    hasHidden: !!hidden,
-    hasBox: !!box,
-    customersCount: customers.length,
-    customersSample: customers?.[0] ?? null,
-    customersKeys: customers?.[0] ? Object.keys(customers[0]) : []
-  });
+    DBG('mountCustomerAutocomplete()', {
+      hasInput: !!input,
+      hasHidden: !!hidden,
+      hasBox: !!box,
+      customersCount: customers.length,
+      customersSample: customers?.[0] ?? null,
+      customersKeys: customers?.[0] ? Object.keys(customers[0]) : []
+    });
 
-  if(!input || !hidden || !box) return;
+    if(!input || !hidden || !box) return;
 
-  // ✅ TU DATA REAL (según logs):
-  // { user_id, customer_name, email, phone, customer_id(null) }
-  const getId = (c)=>{
-    const n = Number(c?.user_id || 0);
-    return Number.isFinite(n) && n > 0 ? n : null;
-  };
+    const getId = (c)=>{
+      const n = Number(c?.user_id || 0);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
 
-  const getName = (c)=> String(c?.customer_name || c?.name || '').trim();
+    const getName = (c)=> String(c?.customer_name || c?.name || '').trim();
 
-  const getMeta = (c)=>{
-    const email = c?.email ? `· ${c.email}` : '';
-    const phone = c?.phone ? `· ${c.phone}` : '';
-    return `${email} ${phone}`.trim();
-  };
+    const getMeta = (c)=>{
+      const email = c?.email ? `· ${c.email}` : '';
+      const phone = c?.phone ? `· ${c.phone}` : '';
+      return `${email} ${phone}`.trim();
+    };
 
-  const hide = ()=>{ box.style.display = 'none'; box.innerHTML = ''; };
-  const show = ()=>{ box.style.display = 'block'; };
+    const hide = ()=>{ box.style.display = 'none'; box.innerHTML = ''; };
+    const show = ()=>{ box.style.display = 'block'; };
 
-  const pick = (c)=>{
-    const id = getId(c);
-    const name = getName(c);
-
-    DBG('pick() attempt', { resolvedId: id, resolvedName: name, raw: c });
-
-    if(!id){
-      DBG('pick() BLOCKED -> id inválido', { raw: c });
-      return;
-    }
-
-    selectedCustomer = { id, name };
-    hidden.value = String(id);
-    input.value = name;
-
-    DBG('pick() OK', { hiddenNow: hidden.value, visibleNow: input.value, selectedCustomer });
-
-    hide();
-  };
-
-  const renderList = (matches)=>{
-    box.innerHTML = matches.map((c, idx)=>{
+    const pick = (c)=>{
       const id = getId(c);
       const name = getName(c);
-      const meta = getMeta(c);
 
-      return `
+      DBG('pick() attempt', { resolvedId: id, resolvedName: name, raw: c });
+
+      if(!id){
+        DBG('pick() BLOCKED -> id inválido', { raw: c });
+        return;
+      }
+
+      selectedCustomer = { id, name };
+      hidden.value = String(id);
+      input.value = name;
+
+      DBG('pick() OK', { hiddenNow: hidden.value, visibleNow: input.value, selectedCustomer });
+
+      hide();
+    };
+
+    const renderList = (matches)=>{
+      box.innerHTML = matches.map((c, idx)=>{
+        const id = getId(c);
+        const name = getName(c);
+        const meta = getMeta(c);
+
+        return `
         <button type="button"
                 class="list-group-item list-group-item-action"
                 data-custid="${id ?? ''}"
@@ -787,134 +805,127 @@ function mountCustomerAutocomplete(){
           ${meta ? `<div class="small text-muted">${safe(meta)}</div>` : ''}
         </button>
       `;
-    }).join('');
-    show();
-  };
+      }).join('');
+      show();
+    };
 
-  const filterMatches = ()=>{
-    // si el usuario escribe, se invalida selección
-    selectedCustomer = null;
-    hidden.value = '';
+    const filterMatches = ()=>{
+      selectedCustomer = null;
+      hidden.value = '';
 
-    const q = String(input.value || '').trim().toLowerCase();
-    DBG('autocomplete input', { q });
+      const q = String(input.value || '').trim().toLowerCase();
+      DBG('autocomplete input', { q });
 
-    if(!q || customers.length === 0){
-      hide();
-      return [];
-    }
+      if(!q || customers.length === 0){
+        hide();
+        return [];
+      }
 
-    const matches = customers
-      .filter(c=>{
-        const name = getName(c).toLowerCase();
-        const email = String(c?.email || '').toLowerCase();
-        const phone = String(c?.phone || '').toLowerCase();
-        return name.includes(q) || email.includes(q) || phone.includes(q);
-      })
-      .slice(0, 10);
+      const matches = customers
+        .filter(c=>{
+          const name = getName(c).toLowerCase();
+          const email = String(c?.email || '').toLowerCase();
+          const phone = String(c?.phone || '').toLowerCase();
+          return name.includes(q) || email.includes(q) || phone.includes(q);
+        })
+        .slice(0, 10);
 
-    DBG('autocomplete matches', {
-      matchesCount: matches.length,
-      sample: matches?.[0] ?? null,
-      sampleResolvedId: matches?.[0] ? getId(matches[0]) : null
+      DBG('autocomplete matches', {
+        matchesCount: matches.length,
+        sample: matches?.[0] ?? null,
+        sampleResolvedId: matches?.[0] ? getId(matches[0]) : null
+      });
+
+      if(matches.length === 0){
+        hide();
+        return [];
+      }
+
+      renderList(matches);
+      return matches;
+    };
+
+    input.addEventListener('input', filterMatches);
+
+    input.addEventListener('focus', ()=>{
+      if(String(input.value || '').trim().length > 0) filterMatches();
     });
 
-    if(matches.length === 0){
-      hide();
-      return [];
-    }
+    const handlePickFromEvent = (e, kind)=>{
+      const btn = e.target?.closest('[data-custid]');
+      if(!btn) return;
 
-    renderList(matches);
-    return matches;
-  };
-
-  input.addEventListener('input', filterMatches);
-
-  input.addEventListener('focus', ()=>{
-    if(String(input.value || '').trim().length > 0) filterMatches();
-  });
-
-  const handlePickFromEvent = (e, kind)=>{
-    const btn = e.target?.closest('[data-custid]');
-    if(!btn) return;
-
-    e.preventDefault(); // ✅ evita blur antes del pick
-
-    const datasetId = btn.dataset.custid;
-    const id = Number(datasetId);
-
-    DBG(`suggest ${kind}`, { datasetId, id });
-
-    if(!Number.isFinite(id) || id <= 0){
-      // fallback por idx
-      const idx = Number(btn.dataset.idx);
-      const c = customers?.[idx];
-      DBG(`suggest ${kind} fallback idx`, { idx, found: !!c, resolvedId: c ? getId(c) : null });
-      if(c) pick(c);
-      return;
-    }
-
-    const c = customers.find(x => getId(x) === id);
-    DBG(`suggest ${kind} find by id`, { id, found: !!c });
-    if(c) pick(c);
-  };
-
-  // ✅ mousedown para seleccionar antes del blur
-  box.addEventListener('mousedown', (e)=> handlePickFromEvent(e, 'mousedown'));
-  // fallback click por si acaso
-  box.addEventListener('click', (e)=> handlePickFromEvent(e, 'click'));
-
-  // ✅ cerrar con delay
-  input.addEventListener('blur', ()=>{
-    setTimeout(()=> hide(), 150);
-  });
-
-  // ✅ teclado
-  input.addEventListener('keydown', (e)=>{
-    if(box.style.display === 'none') return;
-
-    const items = Array.from(box.querySelectorAll('[data-idx]'));
-    if(items.length === 0) return;
-
-    const active = box.querySelector('.active');
-    let idx = active ? Number(active.dataset.idx) : -1;
-
-    if(e.key === 'ArrowDown'){
       e.preventDefault();
-      idx = Math.min(items.length - 1, idx + 1);
-      items.forEach(x=>x.classList.remove('active'));
-      items[idx].classList.add('active');
-      items[idx].scrollIntoView({ block: 'nearest' });
-    }
 
-    if(e.key === 'ArrowUp'){
-      e.preventDefault();
-      idx = Math.max(0, idx - 1);
-      items.forEach(x=>x.classList.remove('active'));
-      items[idx].classList.add('active');
-      items[idx].scrollIntoView({ block: 'nearest' });
-    }
+      const datasetId = btn.dataset.custid;
+      const id = Number(datasetId);
 
-    if(e.key === 'Enter'){
-      if(idx >= 0){
-        e.preventDefault();
-        const id = Number(items[idx].dataset.custid);
-        const c = customers.find(x => getId(x) === id);
-        DBG('keyboard enter', { idx, id, found: !!c });
+      DBG(`suggest ${kind}`, { datasetId, id });
+
+      if(!Number.isFinite(id) || id <= 0){
+        const idx = Number(btn.dataset.idx);
+        const c = customers?.[idx];
+        DBG(`suggest ${kind} fallback idx`, { idx, found: !!c, resolvedId: c ? getId(c) : null });
         if(c) pick(c);
+        return;
       }
-    }
 
-    if(e.key === 'Escape'){
-      hide();
-    }
-  });
+      const c = customers.find(x => getId(x) === id);
+      DBG(`suggest ${kind} find by id`, { id, found: !!c });
+      if(c) pick(c);
+    };
 
-  if(customers.length === 0){
-    console.warn('[POS] customers vacío. Revisa /opticas.');
+    box.addEventListener('mousedown', (e)=> handlePickFromEvent(e, 'mousedown'));
+    box.addEventListener('click', (e)=> handlePickFromEvent(e, 'click'));
+
+    input.addEventListener('blur', ()=>{
+      setTimeout(()=> hide(), 150);
+    });
+
+    input.addEventListener('keydown', (e)=>{
+      if(box.style.display === 'none') return;
+
+      const items = Array.from(box.querySelectorAll('[data-idx]'));
+      if(items.length === 0) return;
+
+      const active = box.querySelector('.active');
+      let idx = active ? Number(active.dataset.idx) : -1;
+
+      if(e.key === 'ArrowDown'){
+        e.preventDefault();
+        idx = Math.min(items.length - 1, idx + 1);
+        items.forEach(x=>x.classList.remove('active'));
+        items[idx].classList.add('active');
+        items[idx].scrollIntoView({ block: 'nearest' });
+      }
+
+      if(e.key === 'ArrowUp'){
+        e.preventDefault();
+        idx = Math.max(0, idx - 1);
+        items.forEach(x=>x.classList.remove('active'));
+        items[idx].classList.add('active');
+        items[idx].scrollIntoView({ block: 'nearest' });
+      }
+
+      if(e.key === 'Enter'){
+        if(idx >= 0){
+          e.preventDefault();
+          const id = Number(items[idx].dataset.custid);
+          const c = customers.find(x => getId(x) === id);
+          DBG('keyboard enter', { idx, id, found: !!c });
+          if(c) pick(c);
+        }
+      }
+
+      if(e.key === 'Escape'){
+        hide();
+      }
+    });
+
+    if(customers.length === 0){
+      console.warn('[POS] customers vacío. Revisa /opticas.');
+    }
   }
-}
-
 
   /* ===================== Events ===================== */
   outlet.addEventListener('click', (e)=>{
@@ -1020,7 +1031,7 @@ function mountCustomerAutocomplete(){
     });
   }
 
-  /* ===================== CHECKOUT (payload nuevo + roles) ===================== */
+  /* ===================== CHECKOUT (pedido) ===================== */
   outlet.querySelector('#btnCheckout')?.addEventListener('click', async (e)=>{
     e.preventDefault();
     if(cart.length === 0) return;
@@ -1039,20 +1050,28 @@ function mountCustomerAutocomplete(){
       return;
     }
 
-    // ===== Cliente según rol =====
+    // ===== (se mantiene tu lógica vieja, aunque para orders no se usa) =====
     let customer_id = null;
     let customer_name = 'Mostrador';
 
     if(isOptica){
-      customer_id = Number(opticaUserContext.id || 0) || null;
+      customer_id = Number(opticaUserContext.optica_id || 0) || null;
       customer_name = String(opticaUserContext.name || 'Óptica').trim();
+
+      DBG('checkout optica mapping (legacy sales)', {
+        user_id: opticaUserContext.id,
+        optica_id: opticaUserContext.optica_id,
+        customer_id,
+        customer_name
+      });
+
       if(!customer_id){
-        Swal.fire('Falta usuario','No se pudo obtener tu user.id desde /me.','warning');
+        Swal.fire('Falta optica_id','No se pudo obtener optica_id desde /me.','warning');
         return;
       }
     }else{
       const input = outlet.querySelector('#customerName');
-      const hidden = outlet.querySelector('#customerId'); // ✅
+      const hidden = outlet.querySelector('#customerId');
       const typed = String(input?.value || '').trim();
       const hid = Number(hidden?.value || 0);
 
@@ -1072,7 +1091,7 @@ function mountCustomerAutocomplete(){
 
     const t = calcTotals();
 
-    // sales.discount_type: none|order_pct|order_amount
+    // (se mantiene tu lógica de descuentos, aunque orders no la usa)
     let discount_type = 'none';
     let discount_value = 0;
 
@@ -1082,7 +1101,7 @@ function mountCustomerAutocomplete(){
       discount_value = pct > 0 ? pct : 0;
     }
 
-    // sale_items payload
+    // items (se mantiene tu cálculo original)
     const items = cart.map(it=>{
       const qty = Number(it.qty || 0);
       const unit_price = Number(it.salePrice ?? it.sale_price ?? 0);
@@ -1118,17 +1137,18 @@ function mountCustomerAutocomplete(){
       };
     });
 
-    const payload = {
-      customer_id,
-      customer_name,
+    // ✅ NUEVO: payload para /orders (mínimo necesario)
+    const orderPayload = {
       payment_method_id,
-      discount_type,
-      discount_value,
-      subtotal: Number(t.subtotal),
-      discount_amount: Number(t.discountAmount),
-      total: Number(t.total),
       notes: null,
-      items
+      items: items.map(it => ({
+        product_id: it.product_id,
+        variant_id: it.variant_id ?? null,
+        qty: it.qty,
+        unit_price: it.unit_price,
+        axis: it.axis ?? null,
+        item_notes: it.item_notes ?? null
+      }))
     };
 
     const discTxt = isOptica
@@ -1138,33 +1158,36 @@ function mountCustomerAutocomplete(){
           : 'Por producto');
 
     const ok = await Swal.fire({
-      title:'Confirmar venta',
-      html:`Cliente: <b>${safe(customer_name)}</b><br>Total: <b>${money(payload.total)}</b><br>Descuento: <b>${safe(discTxt)}</b><br>Pago: <b>${safe(methodKey)}</b>`,
+      title:'Confirmar pedido',
+      html:`Óptica: <b>${safe(isOptica ? (opticaUserContext.name || 'Óptica') : customer_name)}</b><br>Total: <b>${money(t.total)}</b><br>Descuento: <b>${safe(discTxt)}</b><br>Pago: <b>${safe(methodKey)}</b>`,
       icon:'question',
       showCancelButton:true,
-      confirmButtonText:'Procesar'
+      confirmButtonText:'Crear'
     });
 
     if(!ok.isConfirmed) return;
 
     try{
-      await api.post('/sales', payload);
+      // ✅ CAMBIO CLAVE: crear pedido
+      await api.post('/orders', orderPayload);
 
-      // ✅ limpiar carrito
+      // limpiar carrito
       cart = [];
       selectedCustomer = null;
       const hid = outlet.querySelector('#customerId');
       if(hid) hid.value = '';
       renderCart();
 
-      // ✅ RECARGA products+inventory y vuelve a pintar cards+tabla (DataTables safe)
+      // recarga products+inventory (aunque el pedido no descuente stock, recargar no estorba)
       await loadCore();
       refreshInventoryTable();
       await renderCards();
 
-      Swal.fire('Venta registrada','Proceso completado.','success');
+      Swal.fire('Pedido registrado','Proceso completado.','success');
     }catch(err){
-      const msg = err?.response?.data?.message || err?.message || 'Error al registrar la venta';
+      console.log(orderPayload);
+
+      const msg = err?.response?.data?.message || err?.message || 'Error al registrar el pedido';
       const details = err?.response?.data?.errors
         ? Object.values(err.response.data.errors).flat().map(x=>`• ${x}`).join('<br>')
         : '';
