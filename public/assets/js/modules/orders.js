@@ -1,9 +1,26 @@
+// public/assets/js/pages/orders.js (FULL - PAGINATED + DATATABLE + MODAL SKU FIX)
+// - Soporta /api/orders paginado: { data: [], current_page, last_page, ... }
+// - Óptica: solo sus pedidos
+// - Admin/Employee: todos los pedidos
+// - Paginación simple (prev/next + info)
+// - Mantiene modal de detalle + cambios de estatus
+// - FIX: Modal muestra SKU y nombre aunque productsMap falle (usa items[].product si viene)
+
 import { api } from '../services/api.js';
 import { ordersService } from '../services/ordersService.js';
 import { money, formatDateTime } from '../utils/helpers.js';
 import { authService } from '../services/authService.js';
 
-const PM_LABEL = { cash: 'Efectivo', transfer: 'Transferencia', card: 'Tarjeta' };
+// Si tu backend manda payment_method_id (1,2,3) y NO manda code,
+// aquí puedes mapearlo a texto (ajusta a tus IDs reales).
+const PM_ID_LABEL = {
+  1: 'Efectivo',
+  2: 'Tarjeta',
+  3: 'Transferencia'
+};
+
+// Si en algún punto mandas code (cash/card/transfer), también lo soporta
+const PM_CODE_LABEL = { cash: 'Efectivo', transfer: 'Transferencia', card: 'Tarjeta' };
 
 /* ====== ESTATUS ====== */
 const PAYMENT_LABEL = { pendiente: 'Pendiente', pagado: 'Pagado' };
@@ -31,25 +48,37 @@ function safe(v){
 }
 
 function buildProductMap(products){
+  // ✅ Robust: soporta array de productos o array tipo inventory [{product:{...}}]
   const m = new Map();
-  (products || []).forEach(p => m.set(String(p.id), p));
+  (products || []).forEach(row => {
+    const p = row?.product ?? row;
+    if(!p?.id) return;
+    m.set(String(p.id), p);
+  });
   return m;
 }
 
 /* ====== update helper (real API / mock-friendly) ====== */
 async function updateOrderPatch(orderId, patch){
-  if (typeof ordersService.update === 'function') return await ordersService.update(orderId, patch);
-  if (typeof ordersService.patch === 'function') return await ordersService.patch(orderId, patch);
-  if (typeof ordersService.updateStatus === 'function') return await ordersService.updateStatus(orderId, patch);
-  console.warn('ordersService no tiene update/patch/updateStatus. Update será solo visual en esta sesión.');
-  return null;
+  if (typeof ordersService?.update === 'function') return await ordersService.update(orderId, patch);
+  if (typeof ordersService?.patch === 'function') return await ordersService.patch(orderId, patch);
+  if (typeof ordersService?.updateStatus === 'function') return await ordersService.updateStatus(orderId, patch);
+
+  // Fallback directo si no existe service
+  try{
+    return await api.patch(`/orders/${orderId}`, patch);
+  }catch(_e){
+    console.warn('ordersService no tiene update/patch/updateStatus y fallback PATCH falló.');
+    throw _e;
+  }
 }
 
 /* =========================
    NORMALIZACIÓN (backend-friendly)
    Soporta:
-   - DTO camelCase: paymentStatus/processStatus/opticaId/date/items[]
-   - DB snake_case: payment_status/process_status/optica_id/created_at/order_items[]
+   - snake_case (payment_status, process_status, optica_id, created_at, items[])
+   - camelCase (compat)
+   ✅ FIX: guarda sku/name si vienen en item.product
    ========================= */
 function normalizeOrder(o){
   if(!o) return o;
@@ -58,28 +87,33 @@ function normalizeOrder(o){
   const processStatus = o.processStatus ?? o.process_status ?? 'en_proceso';
 
   const date = o.date ?? o.created_at ?? o.createdAt ?? null;
-
   const opticaId = o.opticaId ?? o.optica_id ?? null;
 
+  // Tu API actual trae payment_method_id
   const paymentMethod =
     o.paymentMethod ??
     o.payment_method ??
     o.payment_method_code ??
     o.payment_method_id ??
-    o.paymentMethodCode ??
     null;
-
-  const createdByName = o.createdByName ?? o.created_by_name ?? o.createdBy?.name ?? null;
-  const createdByEmail = o.createdByEmail ?? o.created_by_email ?? o.createdBy?.email ?? null;
-  const createdByRole = o.createdByRole ?? o.created_by_role ?? o.createdBy?.role ?? o.createdBy?.role?.name ?? null;
 
   const subtotal = Number(o.subtotal ?? o.sub_total ?? 0);
   const total = Number(o.total ?? 0);
 
-  const rawItems = o.items ?? o.order_items ?? o.items_list ?? [];
+  const rawItems = o.items ?? o.order_items ?? [];
   const items = Array.isArray(rawItems) ? rawItems.map(it=>{
+    const prod = it.product ?? null;
+
+    const productId = it.productId ?? it.product_id ?? prod?.id ?? null;
+
+    // ✅ FIX: si viene el producto en el item, guarda sku/name aquí
+    const productSku = it.productSku ?? it.sku ?? prod?.sku ?? null;
+    const productName = it.productName ?? it.name ?? prod?.name ?? null;
+
     return {
-      productId: it.productId ?? it.product_id ?? it.product?.id ?? null,
+      productId,
+      productSku,
+      productName,
       qty: Number(it.qty ?? it.quantity ?? 0),
       price: Number(it.price ?? it.unit_price ?? it.unitPrice ?? 0),
       variantId: it.variantId ?? it.variant_id ?? null,
@@ -96,9 +130,6 @@ function normalizeOrder(o){
     paymentMethod,
     paymentStatus,
     processStatus,
-    createdByName,
-    createdByEmail,
-    createdByRole,
     subtotal,
     total,
     items,
@@ -125,7 +156,6 @@ async function loadOpticasIndex(){
     const { data } = await api.get('/opticas');
     const arr = Array.isArray(data) ? data : [];
 
-    // key por optica_id (opticas.id) => coincide con orders.optica_id
     const byId = new Map(
       arr.map(o => [
         String(o.optica_id ?? o.id),
@@ -142,13 +172,43 @@ async function loadOpticasIndex(){
 
     return { list: arr, byId };
   }catch(e){
-    console.warn('[orders] /opticas no disponible o falló:', e?.response?.status || e?.message);
+    console.warn('[orders] /opticas falló:', e?.response?.status || e?.message);
     return { list: [], byId: new Map() };
   }
 }
 
 /* =========================
+   FETCH paginado robusto
+   ========================= */
+function unwrapPaginated(resp){
+  if(Array.isArray(resp)) return { rows: resp, meta: null };
+
+  const root = resp?.data ?? resp;
+
+  if(Array.isArray(root)) return { rows: root, meta: null };
+
+  const rows = Array.isArray(root?.data) ? root.data : [];
+  const meta = (root && typeof root === 'object') ? root : null;
+
+  return { rows, meta };
+}
+
+async function fetchOrdersPage(page=1){
+  try{
+    if(typeof ordersService?.list === 'function'){
+      const maybe = await ordersService.list(page);
+      const un = unwrapPaginated(maybe);
+      if(un.rows.length || un.meta) return un;
+    }
+  }catch(_e){}
+
+  const { data } = await api.get(`/orders?page=${encodeURIComponent(page)}`);
+  return unwrapPaginated(data);
+}
+
+/* =========================
    DETAIL MODAL
+   ✅ FIX: usa sku/name del item si productsMap no lo tiene
    ========================= */
 async function showOrderDetail(order, productsMap, opticasById, ctx){
   const role = ctx?.role || authService.getRole();
@@ -158,9 +218,6 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
     opticasById.get(String(o.opticaId))?.nombre ||
     o.opticaName ||
     `Óptica #${o.opticaId || '—'}`;
-
-  const createdBy = o.createdByName || o.createdByEmail || '—';
-  const createdRole = o.createdByRole || '—';
 
   const paySt = o.paymentStatus || 'pendiente';
   const procSt = o.processStatus || 'en_proceso';
@@ -173,16 +230,21 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
   const procOptionsAdmin = ['en_proceso','listo_para_entregar','entregado','revision'];
   const procOptions = (role === 'admin') ? procOptionsAdmin : procOptionsEmployee;
 
-  const items = (o.items || []).map(it=>{
+  const itemsHtml = (o.items || []).map(it=>{
     const p = productsMap.get(String(it.productId)) || {};
+
+    // ✅ FIX: SKU/Nombre robustos
+    const sku = p.sku || it.productSku || (it.productId ?? '—');
+    const name = p.name || it.productName || 'Producto';
+
     const unit = Number(it.price || 0);
     const qty = Number(it.qty || 0);
     const line = qty * unit;
 
     return `
       <tr>
-        <td>${safe(p.sku || it.productId || '—')}</td>
-        <td>${safe(p.name || 'Producto')}</td>
+        <td>${safe(sku)}</td>
+        <td>${safe(name)}</td>
         <td class="text-end">${qty}</td>
         <td class="text-end">${money(unit)}</td>
         <td class="text-end fw-semibold">${money(line)}</td>
@@ -190,12 +252,17 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
     `;
   }).join('') || `<tr><td colspan="5" class="text-muted">Sin items</td></tr>`;
 
-  // Método pago: si backend manda código (cash/card/transfer) se etiqueta; si manda id, se muestra tal cual
-  const pmKey = (typeof o.paymentMethod === 'string') ? o.paymentMethod : String(o.paymentMethod || '');
-  const pmLabel = PM_LABEL[pmKey] || pmKey || '—';
+  // Método pago: id o code
+  let pmLabel = '—';
+  if(typeof o.paymentMethod === 'number' || String(o.paymentMethod).match(/^\d+$/)){
+    pmLabel = PM_ID_LABEL[Number(o.paymentMethod)] || `ID ${o.paymentMethod}`;
+  }else{
+    const key = String(o.paymentMethod || '').toLowerCase();
+    pmLabel = PM_CODE_LABEL[key] || o.paymentMethod || '—';
+  }
 
   const controlsHtml = (role === 'optica')
-    ? '' // óptica solo ve detalle
+    ? ''
     : `
       <div class="mt-3 p-3 border rounded bg-light">
         <div class="fw-semibold mb-2">Cambios de estatus</div>
@@ -275,11 +342,6 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
           <div class="small text-muted">Estatus de proceso</div>
           <div class="fw-semibold">${badgeHtml('process', procSt)}</div>
         </div>
-
-        <div class="col-12">
-          <div class="small text-muted">Creado por</div>
-          <div class="fw-semibold">${safe(createdBy)} <span class="small text-muted">(${safe(createdRole)})</span></div>
-        </div>
       </div>
 
       ${o.notes ? `
@@ -304,7 +366,7 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
               <th class="text-end">Importe</th>
             </tr>
           </thead>
-          <tbody>${items}</tbody>
+          <tbody>${itemsHtml}</tbody>
         </table>
       </div>
 
@@ -333,7 +395,6 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
         const nextPay = selPay ? selPay.value : paySt;
         const nextProc = selProc ? selProc.value : procSt;
 
-        // reglas
         if(nextPay !== paySt && role !== 'admin'){
           Swal.fire('No permitido', 'Solo admin puede cambiar el estatus de pago.', 'warning');
           return;
@@ -368,21 +429,13 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
         });
         if(!confirm.isConfirmed) return;
 
-        // Backend-friendly patch (snake_case)
         const patch = {};
         if(nextPay !== paySt) patch.payment_status = nextPay;
         if(nextProc !== procSt) patch.process_status = nextProc;
 
-        // También mandamos camelCase por compatibilidad (por si tu service lo espera)
-        const patchCompat = {};
-        if(nextPay !== paySt) patchCompat.paymentStatus = nextPay;
-        if(nextProc !== procSt) patchCompat.processStatus = nextProc;
-
         try{
-          await updateOrderPatch(o.id, { ...patch, ...patchCompat });
-
-          if(typeof ctx?.onLocalUpdate === 'function') ctx.onLocalUpdate(o.id, { ...patchCompat });
-
+          await updateOrderPatch(o.id, patch);
+          if(typeof ctx?.onLocalUpdate === 'function') ctx.onLocalUpdate(o.id, patch);
           Swal.fire('Listo', 'Estatus actualizado.', 'success');
         }catch(err){
           console.error(err);
@@ -394,9 +447,33 @@ async function showOrderDetail(order, productsMap, opticasById, ctx){
 }
 
 /* =========================
-   VISTA ÓPTICA (mis pedidos + stock lectura)
+   PAGINATION UI helper
+   ========================= */
+function paginationHtml(meta){
+  if(!meta || !meta.current_page || !meta.last_page) return '';
+  const cur = Number(meta.current_page);
+  const last = Number(meta.last_page);
+
+  const prevDisabled = cur <= 1 ? 'disabled' : '';
+  const nextDisabled = cur >= last ? 'disabled' : '';
+
+  return `
+    <div class="d-flex align-items-center justify-content-between mt-3">
+      <div class="small text-muted">Página <b>${cur}</b> de <b>${last}</b> · Total: <b>${meta.total ?? '—'}</b></div>
+      <div class="btn-group">
+        <button class="btn btn-sm btn-outline-secondary" data-page="prev" ${prevDisabled}>Anterior</button>
+        <button class="btn btn-sm btn-outline-secondary" data-page="next" ${nextDisabled}>Siguiente</button>
+      </div>
+    </div>
+  `;
+}
+
+/* =========================
+   VISTA ÓPTICA
    ========================= */
 async function renderOpticaOrders(outlet){
+  const role = authService.getRole();
+
   const [{ data: products }, { data: inventory }, meRes, optRes] = await Promise.all([
     api.get('/products'),
     api.get('/inventory'),
@@ -405,20 +482,28 @@ async function renderOpticaOrders(outlet){
   ]);
 
   const productsMap = buildProductMap(products);
+  const opticasById = optRes.byId;
 
   const me = meRes?.data?.user || null;
   const myOpticaId = Number(me?.optica_id || 0) || null;
 
-  // Pedidos desde API (idealmente ya vienen filtrados por rol)
-  const allOrdersRaw = await ordersService.list();
-  const allOrders = (allOrdersRaw || []).map(normalizeOrder);
+  let page = 1;
+  let rows = [];
+  let meta = null;
 
-  // Filtro extra por seguridad (si backend no filtra)
-  const myOrders = allOrders
-    .filter(o => !myOpticaId || Number(o.opticaId) === Number(myOpticaId))
-    .sort((a, b) => new Date(b.date) - new Date(a.date));
+  async function loadPage(p){
+    const res = await fetchOrdersPage(p);
+    rows = (res.rows || []).map(normalizeOrder);
 
-  const opticasById = optRes.byId;
+    if(myOpticaId){
+      rows = rows.filter(o => Number(o.opticaId) === Number(myOpticaId));
+    }
+
+    meta = res.meta;
+    page = meta?.current_page ? Number(meta.current_page) : p;
+  }
+
+  await loadPage(1);
 
   const opticaName =
     opticasById.get(String(myOpticaId))?.nombre ||
@@ -429,12 +514,17 @@ async function renderOpticaOrders(outlet){
     const tbody = outlet.querySelector('#tblMyOrders tbody');
     if(!tbody) return;
 
-    tbody.innerHTML = myOrders.map(o=>{
+    tbody.innerHTML = rows.map(o=>{
       const paySt = o.paymentStatus || 'pendiente';
       const procSt = o.processStatus || 'en_proceso';
 
-      const pmKey = (typeof o.paymentMethod === 'string') ? o.paymentMethod : String(o.paymentMethod || '');
-      const pmLabel = PM_LABEL[pmKey] || pmKey || '—';
+      let pmLabel = '—';
+      if(typeof o.paymentMethod === 'number' || String(o.paymentMethod).match(/^\d+$/)){
+        pmLabel = PM_ID_LABEL[Number(o.paymentMethod)] || `ID ${o.paymentMethod}`;
+      }else{
+        const key = String(o.paymentMethod || '').toLowerCase();
+        pmLabel = PM_CODE_LABEL[key] || o.paymentMethod || '—';
+      }
 
       return `
         <tr data-process="${procSt}">
@@ -454,6 +544,9 @@ async function renderOpticaOrders(outlet){
         <td colspan="7" class="text-muted">Aún no tienes pedidos.</td>
       </tr>
     `;
+
+    const pager = outlet.querySelector('#ordersPager');
+    if(pager) pager.innerHTML = paginationHtml(meta);
   };
 
   outlet.innerHTML = `
@@ -475,7 +568,7 @@ async function renderOpticaOrders(outlet){
                 <tr>
                   <th>SKU</th>
                   <th>Producto</th>
-                  <th>Stock</th>
+                  <th>Disponible</th>
                   <th>Precio</th>
                   <th>Categoría</th>
                   <th>Tipo</th>
@@ -484,10 +577,11 @@ async function renderOpticaOrders(outlet){
               <tbody>
                 ${(inventory || []).map(r=>{
                   const p = r.product || {};
+                  const available = Number(r.available ?? r.stock ?? 0);
                   return `<tr>
                     <td>${safe(p.sku||'')}</td>
                     <td>${safe(p.name||'')}</td>
-                    <td>${Number(r.stock ?? 0)}</td>
+                    <td>${available}</td>
                     <td>${money(p.salePrice ?? p.sale_price ?? 0)}</td>
                     <td>${safe(p.category||'')}</td>
                     <td>${safe(p.type||'')}</td>
@@ -496,7 +590,7 @@ async function renderOpticaOrders(outlet){
               </tbody>
             </table>
           </div>
-          <div class="small text-muted">Tip: usa el buscador/filtros de la tabla.</div>
+          <div class="small text-muted">Tip: usa el buscador del navegador o filtra desde tu UI si lo agregas.</div>
         </div>
       </div>
 
@@ -536,43 +630,24 @@ async function renderOpticaOrders(outlet){
             </table>
           </div>
 
+          <div id="ordersPager"></div>
+
           <div class="small text-muted">Tip: usa el buscador o filtra por proceso.</div>
         </div>
       </div>
     </div>
   `;
 
-  outlet.querySelector('#btnGoPOS')?.addEventListener('click', ()=>{
-    location.hash = '#/pos';
-  });
-
-  // DataTables stock
-  if (window.$ && $.fn.dataTable) {
-    if($.fn.DataTable.isDataTable('#tblStockOptica')){
-      $('#tblStockOptica').DataTable().destroy();
-    }
-    $('#tblStockOptica').DataTable({
-      pageLength: 10,
-      order: [[2, 'asc']],
-      language: {
-        search: "Buscar:",
-        lengthMenu: "Mostrar _MENU_",
-        info: "Mostrando _START_ a _END_ de _TOTAL_",
-        paginate: { previous: "Anterior", next: "Siguiente" },
-        zeroRecords: "No hay registros"
-      }
-    });
-  }
+  outlet.querySelector('#btnGoPOS')?.addEventListener('click', ()=>{ location.hash = '#/pos'; });
 
   renderMyOrdersTbody();
 
-  // filtros pedidos
   const applyOrderFilter = () => {
     const q = (outlet.querySelector('#orderSearch')?.value || '').toLowerCase().trim();
     const proc = outlet.querySelector('#orderProcess')?.value || '';
-    const rows = Array.from(outlet.querySelectorAll('#tblMyOrders tbody tr'));
+    const trs = Array.from(outlet.querySelectorAll('#tblMyOrders tbody tr'));
 
-    rows.forEach(r => {
+    trs.forEach(r => {
       const txt = r.innerText.toLowerCase();
       const okQ = !q || txt.includes(q);
       const okP = !proc || (r.dataset.process === proc);
@@ -586,16 +661,37 @@ async function renderOpticaOrders(outlet){
   outlet.addEventListener('click', async (e)=>{
     const id = e.target?.dataset?.viewOrder;
     if(!id) return;
-    const o = myOrders.find(x=>String(x.id)===String(id));
+
+    const o = rows.find(x=>String(x.id)===String(id));
     if(!o) return;
+
     await showOrderDetail(o, productsMap, opticasById, { role: 'optica' });
+  });
+
+  outlet.addEventListener('click', async (e)=>{
+    const btn = e.target?.closest('[data-page]');
+    if(!btn) return;
+
+    const dir = btn.dataset.page;
+    const cur = Number(meta?.current_page || page);
+    const last = Number(meta?.last_page || cur);
+
+    let next = cur;
+    if(dir === 'prev') next = Math.max(1, cur - 1);
+    if(dir === 'next') next = Math.min(last, cur + 1);
+
+    if(next === cur) return;
+
+    await loadPage(next);
+    renderMyOrdersTbody();
+    applyOrderFilter();
   });
 
   applyOrderFilter();
 }
 
 /* =========================
-   VISTA EMPLEADO/ADMIN: TODOS los pedidos
+   VISTA EMPLEADO/ADMIN
    ========================= */
 async function renderEmployeeOrders(outlet){
   const role = authService.getRole();
@@ -606,36 +702,52 @@ async function renderEmployeeOrders(outlet){
   ]);
 
   const productsMap = buildProductMap(products);
-
-  const allOrdersRaw = (await ordersService.list()) || [];
-  const rows = allOrdersRaw.map(normalizeOrder).sort((a,b)=> new Date(b.date) - new Date(a.date));
-
   const opticasById = optRes.byId;
+
+  let page = 1;
+  let rows = [];
+  let meta = null;
+
+  async function loadPage(p){
+    const res = await fetchOrdersPage(p);
+    rows = (res.rows || []).map(normalizeOrder).sort((a,b)=> new Date(b.date) - new Date(a.date));
+    meta = res.meta;
+    page = meta?.current_page ? Number(meta.current_page) : p;
+  }
+
+  await loadPage(1);
 
   const onLocalUpdate = (orderId, patch)=>{
     const idx = rows.findIndex(x=>String(x.id)===String(orderId));
-    if(idx >= 0) rows[idx] = normalizeOrder({ ...rows[idx], ...patch });
+    if(idx >= 0){
+      rows[idx] = normalizeOrder({ ...rows[idx], ...patch });
+    }
+    renderTbody();
+  };
 
+  function pmLabelFrom(o){
+    if(typeof o.paymentMethod === 'number' || String(o.paymentMethod).match(/^\d+$/)){
+      return PM_ID_LABEL[Number(o.paymentMethod)] || `ID ${o.paymentMethod}`;
+    }
+    const key = String(o.paymentMethod || '').toLowerCase();
+    return PM_CODE_LABEL[key] || o.paymentMethod || '—';
+  }
+
+  function renderTbody(){
     const tbody = outlet.querySelector('#tblAllOrders tbody');
     if(!tbody) return;
 
     tbody.innerHTML = rows.map(o=>{
       const optName = opticasById.get(String(o.opticaId))?.nombre || `Óptica #${o.opticaId || '—'}`;
-      const created = (o.createdByName || o.createdByEmail || '—');
-      const createdRole = (o.createdByRole || '—');
       const paySt = o.paymentStatus || 'pendiente';
       const procSt = o.processStatus || 'en_proceso';
-
-      const pmKey = (typeof o.paymentMethod === 'string') ? o.paymentMethod : String(o.paymentMethod || '');
-      const pmLabel = PM_LABEL[pmKey] || pmKey || '—';
 
       return `
         <tr>
           <td class="fw-semibold">#${safe(o.id)}</td>
           <td class="small">${safe(formatDateTime(o.date))}</td>
           <td>${safe(optName)}</td>
-          <td class="small">${safe(created)} <span class="text-muted">(${safe(createdRole)})</span></td>
-          <td class="small">${safe(pmLabel)}</td>
+          <td class="small">${safe(pmLabelFrom(o))}</td>
           <td>${badgeHtml('payment', paySt)}</td>
           <td>${badgeHtml('process', procSt)}</td>
           <td class="fw-bold">${money(o.total || 0)}</td>
@@ -644,14 +756,21 @@ async function renderEmployeeOrders(outlet){
           </td>
         </tr>
       `;
-    }).join('');
-  };
+    }).join('') || `
+      <tr>
+        <td colspan="8" class="text-muted">No hay pedidos.</td>
+      </tr>
+    `;
+
+    const pager = outlet.querySelector('#ordersPagerAll');
+    if(pager) pager.innerHTML = paginationHtml(meta);
+  }
 
   outlet.innerHTML = `
     <div class="d-flex align-items-center justify-content-between mb-3">
       <div>
         <h4 class="mb-0">Pedidos</h4>
-        <div class="text-muted small">Ver pedidos de ópticas y del sistema</div>
+        <div class="text-muted small">Ver pedidos de todas las ópticas</div>
       </div>
     </div>
 
@@ -663,74 +782,51 @@ async function renderEmployeeOrders(outlet){
               <th>#</th>
               <th>Fecha</th>
               <th>Óptica</th>
-              <th>Creado por</th>
-              <th>Pago (método)</th>
+              <th>Pago</th>
               <th>Pago est.</th>
               <th>Proceso</th>
               <th>Total</th>
               <th></th>
             </tr>
           </thead>
-          <tbody>
-            ${rows.map(o=>{
-              const optName = opticasById.get(String(o.opticaId))?.nombre || `Óptica #${o.opticaId || '—'}`;
-              const created = (o.createdByName || o.createdByEmail || '—');
-              const createdRole = (o.createdByRole || '—');
-              const paySt = o.paymentStatus || 'pendiente';
-              const procSt = o.processStatus || 'en_proceso';
-
-              const pmKey = (typeof o.paymentMethod === 'string') ? o.paymentMethod : String(o.paymentMethod || '');
-              const pmLabel = PM_LABEL[pmKey] || pmKey || '—';
-
-              return `
-                <tr>
-                  <td class="fw-semibold">#${safe(o.id)}</td>
-                  <td class="small">${safe(formatDateTime(o.date))}</td>
-                  <td>${safe(optName)}</td>
-                  <td class="small">${safe(created)} <span class="text-muted">(${safe(createdRole)})</span></td>
-                  <td class="small">${safe(pmLabel)}</td>
-                  <td>${badgeHtml('payment', paySt)}</td>
-                  <td>${badgeHtml('process', procSt)}</td>
-                  <td class="fw-bold">${money(o.total || 0)}</td>
-                  <td class="text-end">
-                    <button class="btn btn-sm btn-outline-brand" data-view-order="${o.id}">Detalle</button>
-                  </td>
-                </tr>
-              `;
-            }).join('')}
-          </tbody>
+          <tbody></tbody>
         </table>
       </div>
 
+      <div id="ordersPagerAll"></div>
+
       <div class="small text-muted mt-2">
-        Tip: usa búsqueda/filtrado de la tabla.
+        Tip: usa Ctrl+F o agrega un buscador si quieres filtro por texto.
       </div>
     </div>
   `;
 
-  if(window.$ && $.fn.dataTable){
-    if($.fn.DataTable.isDataTable('#tblAllOrders')){
-      $('#tblAllOrders').DataTable().destroy();
-    }
-    $('#tblAllOrders').DataTable({
-      pageLength: 10,
-      order: [[1,'desc']],
-      language: {
-        search: "Buscar:",
-        lengthMenu: "Mostrar _MENU_",
-        info: "Mostrando _START_ a _END_ de _TOTAL_",
-        paginate: { previous: "Anterior", next: "Siguiente" },
-        zeroRecords: "No hay registros"
-      }
-    });
-  }
+  renderTbody();
 
   outlet.addEventListener('click', async (e)=>{
     const id = e.target?.dataset?.viewOrder;
-    if(!id) return;
-    const o = rows.find(x=>String(x.id)===String(id));
-    if(!o) return;
-    await showOrderDetail(o, productsMap, opticasById, { role, onLocalUpdate });
+    if(id){
+      const o = rows.find(x=>String(x.id)===String(id));
+      if(!o) return;
+      await showOrderDetail(o, productsMap, opticasById, { role, onLocalUpdate });
+      return;
+    }
+
+    const btn = e.target?.closest('[data-page]');
+    if(!btn) return;
+
+    const dir = btn.dataset.page;
+    const cur = Number(meta?.current_page || page);
+    const last = Number(meta?.last_page || cur);
+
+    let next = cur;
+    if(dir === 'prev') next = Math.max(1, cur - 1);
+    if(dir === 'next') next = Math.min(last, cur + 1);
+
+    if(next === cur) return;
+
+    await loadPage(next);
+    renderTbody();
   });
 }
 

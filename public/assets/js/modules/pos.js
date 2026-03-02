@@ -1,15 +1,11 @@
 // public/assets/js/pages/pos.js (FULL - UPDATED)
-// - Recarga products + inventory después de una venta (cards + tabla) ✅
-// - OPTICA: NO muestra input cliente, usa customer_id = users.optica_id (desde /me) y customer_name = users.name ✅
-// - ADMIN/EMPLOYEE: 2 inputs (hidden id + visible name) + autocomplete robusto ✅
-// - DEBUG: console.logs para detectar por qué no autocompleta ✅
-// - Mantiene payload nuevo (payment_method_id, items[].product_id, unit_price, etc.) ✅
-// - Refresh inventory table: DataTables destroy -> render -> init ✅
-//
-// ✅ CAMBIO OPCIÓN 1:
-// - En lugar de POST /sales, ahora la óptica crea pedidos: POST /orders
-// - Se mantiene TODO el resto del código (UI, descuentos, detalles, etc.)
-// - El payload enviado es el de orders: { payment_method_id, notes, items[] }
+// - Recarga products + inventory después de crear pedido ✅
+// - ÓPTICA crea pedidos: POST /orders ✅
+// - Stock mostrado y validado por "available" (stock - reserved) ✅
+// - Soporta 2 formatos:
+//    A) /products => productos planos, /inventory => rows con stock/reserved/available
+//    B) /products => rows tipo inventario {stock,reserved,available, product:{...}} (como el JSON que pegaste)
+// - Fix bug: $.fn.datatable -> $.fn.dataTable ✅
 
 import { api } from '../services/api.js';
 import { money } from '../utils/helpers.js';
@@ -50,7 +46,8 @@ export async function renderPOS(outlet){
     });
   };
 
-  const stockBadge = (st)=>{
+  const stockBadge = (available)=>{ // ahora badge se basa en available
+    const st = Number(available ?? 0);
     if(st <= 0) return `<span class="badge text-bg-secondary">Sin stock</span>`;
     if(st <= CRITICAL_STOCK) return `<span class="badge text-bg-danger">Crítico</span>`;
     return `<span class="badge text-bg-success">OK</span>`;
@@ -106,46 +103,116 @@ export async function renderPOS(outlet){
   /* ===================== Estado recargable ===================== */
   let products = [];
   let inventory = [];
-  let stockById = new Map();
 
-  // customers (autocomplete) solo admin/employee (son users con role_id=3)
+  // Maps por product_id
+  let stockById = new Map();      // stock total
+  let reservedById = new Map();   // reservado
+  let availableById = new Map();  // disponible = stock - reserved
+
+  // customers (autocomplete) solo admin/employee
   let customers = [];
   let selectedCustomer = null; // {id, name}
 
-  // ✅ optica context (para rol optica)
+  // optica context
   let opticaUserContext = { id: null, name: null, optica_id: null };
 
-  const buildStockMap = ()=>{
-    stockById = new Map(
-      (inventory || []).map(r=>{
-        const pid = Number(r?.product?.id ?? r?.id);
+  const normalizeInventoryRows = (arr)=>{
+    const rows = Array.isArray(arr) ? arr : [];
+    // filas esperadas: {stock,reserved,available, product:{id,...}}
+    return rows
+      .map(r=>{
+        const p = r?.product || null;
+        const pid = Number(p?.id ?? r?.product_id ?? r?.id ?? 0) || 0;
+        if(!pid) return null;
+
         const st = Number(r?.stock ?? 0);
-        return [pid, st];
+        const rs = Number(r?.reserved ?? 0);
+        const av = Number(r?.available ?? (st - rs));
+
+        return {
+          stock: st,
+          reserved: rs,
+          available: av,
+          product: p || r
+        };
       })
-    );
+      .filter(Boolean);
   };
 
-  const getStock = (productId) => Number(stockById.get(Number(productId)) ?? 0);
+  const buildStockMaps = ()=>{
+    stockById = new Map();
+    reservedById = new Map();
+    availableById = new Map();
+
+    for(const r of (inventory || [])){
+      const pid = Number(r?.product?.id ?? r?.product_id ?? r?.id ?? 0);
+      if(!pid) continue;
+
+      const st = Number(r?.stock ?? 0);
+      const rs = Number(r?.reserved ?? 0);
+      const av = Number(r?.available ?? (st - rs));
+
+      stockById.set(pid, st);
+      reservedById.set(pid, rs);
+      availableById.set(pid, av);
+    }
+  };
+
+  // ✅ IMPORTANTE: esto es lo que usarán las cards y el carrito
+  const getAvailable = (productId) => Number(availableById.get(Number(productId)) ?? 0);
+  const getStockTotal = (productId) => Number(stockById.get(Number(productId)) ?? 0);
+  const getReserved = (productId) => Number(reservedById.get(Number(productId)) ?? 0);
+
+  // compat (tu código usaba getStock)
+  const getStock = (productId) => getAvailable(productId);
 
   const getCartQty = (productId) =>
     Number(cart.find(x => Number(x.id) === Number(productId))?.qty ?? 0);
 
   /* ===================== Load API ===================== */
   async function loadCore(){
-    DBG('loadCore -> /products + /inventory');
-    const res = await Promise.all([
+    DBG('loadCore -> /products + /inventory (shape-safe)');
+
+    const [prodRes, invRes] = await Promise.allSettled([
       api.get('/products'),
       api.get('/inventory'),
     ]);
-    products = res[0].data || [];
-    inventory = res[1].data || [];
-    buildStockMap();
-    DBG('loadCore done', { productsCount: products.length, inventoryCount: inventory.length });
+
+    const prodData = (prodRes.status === 'fulfilled') ? (prodRes.value?.data ?? []) : [];
+    const invData  = (invRes.status === 'fulfilled')  ? (invRes.value?.data ?? [])  : [];
+
+    const productsLooksLikeInventory = Array.isArray(prodData) && prodData[0] && (prodData[0].product !== undefined);
+
+    if(productsLooksLikeInventory){
+      // ✅ Caso B: /products ya viene como inventario (tu JSON pegado)
+      inventory = normalizeInventoryRows(prodData);
+
+      // products planos para el grid
+      products = inventory.map(r=>{
+        const p = r.product || {};
+        return {
+          ...p,
+          // por si quieres depurar
+          __stock: r.stock,
+          __reserved: r.reserved,
+          __available: r.available,
+        };
+      });
+
+      DBG('loadCore: using /products as inventory rows', { productsCount: products.length, inventoryCount: inventory.length });
+    }else{
+      // ✅ Caso A: /products normal + /inventory con stock
+      products = Array.isArray(prodData) ? prodData : [];
+      inventory = normalizeInventoryRows(invData);
+
+      DBG('loadCore: using /inventory rows', { productsCount: products.length, inventoryCount: inventory.length });
+    }
+
+    buildStockMaps();
   }
 
   async function loadCustomersIfNeeded(){
     if(isOptica) return;
-    // Este endpoint debe regresar users role_id=3 con {id,name,email,phone}
     try{
       DBG('loadCustomersIfNeeded -> /opticas');
       const { data } = await api.get('/opticas');
@@ -167,22 +234,18 @@ export async function renderPOS(outlet){
     try{
       DBG('loadOpticaUserContextIfNeeded -> /me');
       const { data: me } = await api.get('/me');
-
-      // ✅ /me devuelve { ok, user, role }
       const u = me?.user || null;
 
       opticaUserContext = {
-        id: Number(u?.id || 0) || null,                  // users.id (solo referencia)
+        id: Number(u?.id || 0) || null,
         name: String(u?.name || '').trim() || null,
-        optica_id: Number(u?.optica_id || 0) || null     // (para orders: opticas.id)
+        optica_id: Number(u?.optica_id || 0) || null
       };
 
       DBG('opticaUserContext', opticaUserContext);
 
-      // ✅ Actualiza el UI si ya está pintado
       const box = outlet.querySelector('#opticaCustomerBox');
       if(box) box.textContent = opticaUserContext.name || 'Óptica';
-
     }catch(e){
       opticaUserContext = { id: null, name: null, optica_id: null };
       DBG('loadOpticaUserContextIfNeeded ERROR', {
@@ -199,7 +262,6 @@ export async function renderPOS(outlet){
   /* ===================== Images (protected) ===================== */
   async function getProtectedImageUrl(productId){
     const pid = Number(productId);
-
     if(imageUrlCache.has(pid)) return imageUrlCache.get(pid);
 
     if(!token){
@@ -209,6 +271,8 @@ export async function renderPOS(outlet){
 
     try{
       const blob = await api.getBlob(`/products/${pid}/image`);
+      if(!blob || blob.size === 0) throw new Error('Empty image');
+
       const url = URL.createObjectURL(blob);
       imageUrlCache.set(pid, url);
       return url;
@@ -221,13 +285,21 @@ export async function renderPOS(outlet){
   async function hydrateImages(container){
     const imgs = container.querySelectorAll('img[data-imgpid]');
     const tasks = [];
+
     for(const img of imgs){
       const pid = img.dataset.imgpid;
+
+      img.onerror = () => {
+        img.onerror = null;
+        img.src = PLACEHOLDER_IMG;
+      };
+
       tasks.push((async ()=>{
         const url = await getProtectedImageUrl(pid);
         img.src = url || PLACEHOLDER_IMG;
       })());
     }
+
     await Promise.allSettled(tasks);
   }
 
@@ -236,7 +308,7 @@ export async function renderPOS(outlet){
   let selectedCategory = 'ALL';
   let searchQuery = '';
 
-  let discountMode = 'order'; // 'order' | 'item'
+  let discountMode = 'order';
   let orderDiscountPct = 0;
 
   /* ===================== UI ===================== */
@@ -279,7 +351,7 @@ export async function renderPOS(outlet){
               </div>
             `
         }
-        <div class="small text-muted">Stock crítico = ≤ ${CRITICAL_STOCK}</div>
+        <div class="small text-muted">Stock crítico (disponible) = ≤ ${CRITICAL_STOCK}</div>
         ${!token ? `<div class="small text-warning">⚠️ Sin token: no se cargarán imágenes protegidas.</div>` : ``}
       </div>
     </div>
@@ -304,9 +376,11 @@ export async function renderPOS(outlet){
                   <th>Producto</th>
                   <th>Categoría</th>
                   <th>Tipo</th>
-                  <th>Stock</th>
+                  <th class="text-end">Stock</th>
+                  <th class="text-end">Reservado</th>
+                  <th class="text-end">Disponible</th>
                   <th>Estatus</th>
-                  <th>Precio</th>
+                  <th class="text-end">Precio</th>
                 </tr>
               </thead>
               <tbody id="posStockTbody"></tbody>
@@ -362,9 +436,7 @@ export async function renderPOS(outlet){
               : `
                 <div class="mt-3 position-relative">
                   <label class="form-label">Cliente</label>
-                  <!-- ✅ hidden input para id -->
                   <input type="hidden" id="customerId" value="" />
-                  <!-- ✅ visible input para nombre -->
                   <input id="customerName" class="form-control" placeholder="Buscar óptica..." autocomplete="off">
                   <div id="customerSuggest" class="list-group position-absolute w-100"
                        style="z-index:2000; display:none; max-height:240px; overflow:auto;">
@@ -395,15 +467,6 @@ export async function renderPOS(outlet){
   const orderDiscountInp = isOptica ? null : outlet.querySelector('#orderDiscount');
   const orderDiscountHint = isOptica ? null : outlet.querySelector('#orderDiscountHint');
 
-  DBG('DOM refs', {
-    grid: !!grid,
-    countEl: !!countEl,
-    btnCheckout: !!btnCheckout,
-    customerName: !!outlet.querySelector('#customerName'),
-    customerId: !!outlet.querySelector('#customerId'),
-    customerSuggest: !!outlet.querySelector('#customerSuggest')
-  });
-
   const setCheckoutState = ()=>{
     const empty = cart.length === 0;
     btnCheckout.disabled = empty;
@@ -421,16 +484,21 @@ export async function renderPOS(outlet){
     const tbody = outlet.querySelector('#posStockTbody');
     tbody.innerHTML = (inventory || []).map(r=>{
       const p = r.product || r;
-      const st = Number(r.stock ?? p.stock ?? 0);
+      const st = Number(r.stock ?? 0);
+      const rs = Number(r.reserved ?? 0);
+      const av = Number(r.available ?? (st - rs));
+
       return `
-        <tr class="${st<=CRITICAL_STOCK ? 'table-warning' : ''}">
+        <tr class="${av<=CRITICAL_STOCK ? 'table-warning' : ''}">
           <td>${safe(p.sku||'')}</td>
           <td>${safe(p.name||'')}</td>
           <td class="small text-muted">${safe(p.category||'')}</td>
           <td class="small text-muted">${safe(p.type||'')}</td>
-          <td class="fw-semibold">${st}</td>
-          <td>${stockBadge(st)}</td>
-          <td>${money(p.salePrice ?? p.sale_price ?? 0)}</td>
+          <td class="text-end fw-semibold">${st}</td>
+          <td class="text-end">${rs}</td>
+          <td class="text-end fw-semibold">${av}</td>
+          <td>${stockBadge(av)}</td>
+          <td class="text-end">${money(p.salePrice ?? p.sale_price ?? 0)}</td>
         </tr>
       `;
     }).join('');
@@ -445,7 +513,7 @@ export async function renderPOS(outlet){
 
     $('#tblPosStock').DataTable({
       pageLength: 8,
-      order: [[4,'asc']],
+      order: [[6,'asc']], // ordenar por disponible
       language: {
         search: "Buscar:",
         lengthMenu: "Mostrar _MENU_",
@@ -458,7 +526,7 @@ export async function renderPOS(outlet){
 
   function refreshInventoryTable(){
     DBG('refreshInventoryTable()');
-    if(window.$ && $.fn.datatable && $.fn.DataTable.isDataTable('#tblPosStock')){
+    if(window.$ && $.fn.dataTable && $.fn.DataTable.isDataTable('#tblPosStock')){ // ✅ FIX
       DBG('refreshInventoryTable: destroying DT');
       $('#tblPosStock').DataTable().destroy();
     }
@@ -480,9 +548,12 @@ export async function renderPOS(outlet){
     }
 
     grid.innerHTML = filtered.map(p=>{
-      const st = getStock(p.id);
-      const disabled = st <= 0 ? 'disabled' : '';
-      const critical = st > 0 && st <= CRITICAL_STOCK;
+      const available = getAvailable(p.id);            // ✅ disponible
+      const totalStock = getStockTotal(p.id);          // opcional
+      const reserved = getReserved(p.id);              // opcional
+
+      const disabled = available <= 0 ? 'disabled' : '';
+      const critical = available > 0 && available <= CRITICAL_STOCK;
 
       return `
         <div class="col-12 col-sm-6 col-xl-4">
@@ -504,7 +575,7 @@ export async function renderPOS(outlet){
                 </div>
                 <div class="text-end">
                   <div class="small text-muted">${safe(p.sku)}</div>
-                  <div>${stockBadge(st)}</div>
+                  <div>${stockBadge(available)}</div>
                 </div>
               </div>
 
@@ -516,7 +587,8 @@ export async function renderPOS(outlet){
               <div class="mt-2 d-flex align-items-center justify-content-between">
                 <div class="fw-bold">${money(p.salePrice ?? p.sale_price ?? 0)}</div>
                 <div class="small ${critical ? 'text-danger' : 'text-muted'}">
-                  Stock: <b>${st}</b>
+                  Disponible: <b>${available}</b>
+                  <span class="text-muted"></span>
                 </div>
               </div>
 
@@ -528,8 +600,8 @@ export async function renderPOS(outlet){
               </div>
 
               ${
-                st <= 0
-                  ? `<div class="small text-muted mt-2">Sin stock</div>`
+                available <= 0
+                  ? `<div class="small text-muted mt-2">Sin stock disponible</div>`
                   : (critical ? `<div class="small text-danger mt-2">Stock crítico</div>` : ``)
               }
             </div>
@@ -542,7 +614,10 @@ export async function renderPOS(outlet){
   };
 
   const showProductDetails = async (p)=>{
-    const st = getStock(p.id);
+    const available = getAvailable(p.id);
+    const totalStock = getStockTotal(p.id);
+    const reserved = getReserved(p.id);
+
     const desc = (p.description ?? '').toString().trim();
     const g = p.graduation || null;
     const b = p.bisel || null;
@@ -578,7 +653,11 @@ export async function renderPOS(outlet){
           <div style="min-width:0;">
             <div class="fw-bold">${safe(p.name)}</div>
             <div class="small text-muted">${safe(p.sku)}</div>
-            <div class="mt-1">${stockBadge(st)} <span class="small text-muted ms-2">Stock: <b>${st}</b></span></div>
+            <div class="mt-1">${stockBadge(available)}
+              <span class="small text-muted ms-2">
+                Disponible: <b>${available}</b> · Stock: ${totalStock} · Res: ${reserved}
+              </span>
+            </div>
             <div class="mt-2 fw-bold">${money(p.salePrice ?? p.sale_price ?? 0)}</div>
           </div>
         </div>
@@ -641,7 +720,6 @@ export async function renderPOS(outlet){
       return { subtotal, discountAmount, total, orderDiscountPct: pct };
     }
 
-    // item
     let discountAmount = 0;
     for(const it of cart){
       const pct = clampPct(it.itemDiscountPct || 0);
@@ -664,8 +742,8 @@ export async function renderPOS(outlet){
     }
 
     box.innerHTML = cart.map(it=>{
-      const st = getStock(it.id);
-      const atLimit = it.qty >= st;
+      const available = getAvailable(it.id);
+      const atLimit = it.qty >= available;
 
       const itemDisc = isOptica ? '' : `
         <div class="mt-1 ${discountMode==='item' ? '' : 'd-none'}" data-itemdiscbox="${it.id}">
@@ -686,8 +764,8 @@ export async function renderPOS(outlet){
         <div class="d-flex justify-content-between border rounded p-2 mb-2">
           <div style="min-width:0;">
             <div class="fw-semibold">${safe(it.name)}</div>
-            <div class="small text-muted">${safe(it.sku)} · ${money(it.salePrice ?? it.sale_price ?? 0)} · Stock: ${st}</div>
-            ${st<=CRITICAL_STOCK && st>0 ? `<div class="small text-danger">Stock crítico</div>` : ``}
+            <div class="small text-muted">${safe(it.sku)} · ${money(it.salePrice ?? it.sale_price ?? 0)} · Disponible: ${available}</div>
+            ${available<=CRITICAL_STOCK && available>0 ? `<div class="small text-danger">Stock crítico</div>` : ``}
             ${itemDisc}
           </div>
 
@@ -710,10 +788,10 @@ export async function renderPOS(outlet){
   };
 
   const addToCart = (p)=>{
-    const st = getStock(p.id);
+    const available = getAvailable(p.id);
     const inCart = getCartQty(p.id);
 
-    if(st <= 0 || inCart + 1 > st){
+    if(available <= 0 || inCart + 1 > available){
       warnNoStock(p.name);
       return false;
     }
@@ -740,17 +818,8 @@ export async function renderPOS(outlet){
     if(isOptica) return;
 
     const input = outlet.querySelector('#customerName');
-    const hidden = outlet.querySelector('#customerId'); // ✅ hidden id
+    const hidden = outlet.querySelector('#customerId');
     const box = outlet.querySelector('#customerSuggest');
-
-    DBG('mountCustomerAutocomplete()', {
-      hasInput: !!input,
-      hasHidden: !!hidden,
-      hasBox: !!box,
-      customersCount: customers.length,
-      customersSample: customers?.[0] ?? null,
-      customersKeys: customers?.[0] ? Object.keys(customers[0]) : []
-    });
 
     if(!input || !hidden || !box) return;
 
@@ -773,20 +842,11 @@ export async function renderPOS(outlet){
     const pick = (c)=>{
       const id = getId(c);
       const name = getName(c);
-
-      DBG('pick() attempt', { resolvedId: id, resolvedName: name, raw: c });
-
-      if(!id){
-        DBG('pick() BLOCKED -> id inválido', { raw: c });
-        return;
-      }
+      if(!id) return;
 
       selectedCustomer = { id, name };
       hidden.value = String(id);
       input.value = name;
-
-      DBG('pick() OK', { hiddenNow: hidden.value, visibleNow: input.value, selectedCustomer });
-
       hide();
     };
 
@@ -797,14 +857,14 @@ export async function renderPOS(outlet){
         const meta = getMeta(c);
 
         return `
-        <button type="button"
-                class="list-group-item list-group-item-action"
-                data-custid="${id ?? ''}"
-                data-idx="${idx}">
-          <div class="fw-semibold">${safe(name || '(Sin nombre)')}</div>
-          ${meta ? `<div class="small text-muted">${safe(meta)}</div>` : ''}
-        </button>
-      `;
+          <button type="button"
+                  class="list-group-item list-group-item-action"
+                  data-custid="${id ?? ''}"
+                  data-idx="${idx}">
+            <div class="fw-semibold">${safe(name || '(Sin nombre)')}</div>
+            ${meta ? `<div class="small text-muted">${safe(meta)}</div>` : ''}
+          </button>
+        `;
       }).join('');
       show();
     };
@@ -814,12 +874,7 @@ export async function renderPOS(outlet){
       hidden.value = '';
 
       const q = String(input.value || '').trim().toLowerCase();
-      DBG('autocomplete input', { q });
-
-      if(!q || customers.length === 0){
-        hide();
-        return [];
-      }
+      if(!q || customers.length === 0){ hide(); return []; }
 
       const matches = customers
         .filter(c=>{
@@ -830,101 +885,30 @@ export async function renderPOS(outlet){
         })
         .slice(0, 10);
 
-      DBG('autocomplete matches', {
-        matchesCount: matches.length,
-        sample: matches?.[0] ?? null,
-        sampleResolvedId: matches?.[0] ? getId(matches[0]) : null
-      });
-
-      if(matches.length === 0){
-        hide();
-        return [];
-      }
-
+      if(matches.length === 0){ hide(); return []; }
       renderList(matches);
       return matches;
     };
 
     input.addEventListener('input', filterMatches);
+    input.addEventListener('focus', ()=>{ if(String(input.value||'').trim()) filterMatches(); });
 
-    input.addEventListener('focus', ()=>{
-      if(String(input.value || '').trim().length > 0) filterMatches();
-    });
-
-    const handlePickFromEvent = (e, kind)=>{
+    const handlePickFromEvent = (e)=>{
       const btn = e.target?.closest('[data-custid]');
       if(!btn) return;
-
       e.preventDefault();
 
-      const datasetId = btn.dataset.custid;
-      const id = Number(datasetId);
-
-      DBG(`suggest ${kind}`, { datasetId, id });
-
-      if(!Number.isFinite(id) || id <= 0){
-        const idx = Number(btn.dataset.idx);
-        const c = customers?.[idx];
-        DBG(`suggest ${kind} fallback idx`, { idx, found: !!c, resolvedId: c ? getId(c) : null });
-        if(c) pick(c);
-        return;
-      }
+      const id = Number(btn.dataset.custid || 0);
+      if(!id) return;
 
       const c = customers.find(x => getId(x) === id);
-      DBG(`suggest ${kind} find by id`, { id, found: !!c });
       if(c) pick(c);
     };
 
-    box.addEventListener('mousedown', (e)=> handlePickFromEvent(e, 'mousedown'));
-    box.addEventListener('click', (e)=> handlePickFromEvent(e, 'click'));
+    box.addEventListener('mousedown', handlePickFromEvent);
+    box.addEventListener('click', handlePickFromEvent);
 
-    input.addEventListener('blur', ()=>{
-      setTimeout(()=> hide(), 150);
-    });
-
-    input.addEventListener('keydown', (e)=>{
-      if(box.style.display === 'none') return;
-
-      const items = Array.from(box.querySelectorAll('[data-idx]'));
-      if(items.length === 0) return;
-
-      const active = box.querySelector('.active');
-      let idx = active ? Number(active.dataset.idx) : -1;
-
-      if(e.key === 'ArrowDown'){
-        e.preventDefault();
-        idx = Math.min(items.length - 1, idx + 1);
-        items.forEach(x=>x.classList.remove('active'));
-        items[idx].classList.add('active');
-        items[idx].scrollIntoView({ block: 'nearest' });
-      }
-
-      if(e.key === 'ArrowUp'){
-        e.preventDefault();
-        idx = Math.max(0, idx - 1);
-        items.forEach(x=>x.classList.remove('active'));
-        items[idx].classList.add('active');
-        items[idx].scrollIntoView({ block: 'nearest' });
-      }
-
-      if(e.key === 'Enter'){
-        if(idx >= 0){
-          e.preventDefault();
-          const id = Number(items[idx].dataset.custid);
-          const c = customers.find(x => getId(x) === id);
-          DBG('keyboard enter', { idx, id, found: !!c });
-          if(c) pick(c);
-        }
-      }
-
-      if(e.key === 'Escape'){
-        hide();
-      }
-    });
-
-    if(customers.length === 0){
-      console.warn('[POS] customers vacío. Revisa /opticas.');
-    }
+    input.addEventListener('blur', ()=> setTimeout(()=> hide(), 150));
   }
 
   /* ===================== Events ===================== */
@@ -962,8 +946,8 @@ export async function renderPOS(outlet){
     if(incId){
       const it = cart.find(x=>String(x.id)===String(incId));
       if(it){
-        const st = getStock(it.id);
-        if(st <= 0 || it.qty + 1 > st){ warnNoStock(it.name); return; }
+        const available = getAvailable(it.id);
+        if(available <= 0 || it.qty + 1 > available){ warnNoStock(it.name); return; }
         it.qty++;
         renderCart();
       }
@@ -991,7 +975,6 @@ export async function renderPOS(outlet){
     renderCards();
   });
 
-  // descuentos
   if(!isOptica){
     discountModeSel.addEventListener('change', ()=>{
       discountMode = discountModeSel.value === 'item' ? 'item' : 'order';
@@ -1036,8 +1019,10 @@ export async function renderPOS(outlet){
     e.preventDefault();
     if(cart.length === 0) return;
 
+    // validar contra disponible
     for(const it of cart){
-      if(it.qty > getStock(it.id)){
+      const available = getAvailable(it.id);
+      if(it.qty > available){
         warnNoStock(it.name);
         return;
       }
@@ -1050,116 +1035,44 @@ export async function renderPOS(outlet){
       return;
     }
 
-    // ===== (se mantiene tu lógica vieja, aunque para orders no se usa) =====
-    let customer_id = null;
-    let customer_name = 'Mostrador';
-
-    if(isOptica){
-      customer_id = Number(opticaUserContext.optica_id || 0) || null;
-      customer_name = String(opticaUserContext.name || 'Óptica').trim();
-
-      DBG('checkout optica mapping (legacy sales)', {
-        user_id: opticaUserContext.id,
-        optica_id: opticaUserContext.optica_id,
-        customer_id,
-        customer_name
-      });
-
-      if(!customer_id){
-        Swal.fire('Falta optica_id','No se pudo obtener optica_id desde /me.','warning');
-        return;
-      }
-    }else{
-      const input = outlet.querySelector('#customerName');
-      const hidden = outlet.querySelector('#customerId');
-      const typed = String(input?.value || '').trim();
-      const hid = Number(hidden?.value || 0);
-
-      DBG('checkout customer (admin)', { typed, hiddenValue: hidden?.value, selectedCustomer });
-
-      if(hid){
-        customer_id = hid;
-        customer_name = typed || 'Mostrador';
-      }else if(selectedCustomer?.id){
-        customer_id = Number(selectedCustomer.id);
-        customer_name = String(selectedCustomer.name || typed || 'Mostrador').trim();
-      }else{
-        customer_id = null;
-        customer_name = typed || 'Mostrador';
-      }
-    }
-
     const t = calcTotals();
 
-    // (se mantiene tu lógica de descuentos, aunque orders no la usa)
-    let discount_type = 'none';
-    let discount_value = 0;
-
-    if(!isOptica && discountMode === 'order'){
-      const pct = clampPct(orderDiscountPct);
-      discount_type = pct > 0 ? 'order_pct' : 'none';
-      discount_value = pct > 0 ? pct : 0;
-    }
-
-    // items (se mantiene tu cálculo original)
     const items = cart.map(it=>{
       const qty = Number(it.qty || 0);
       const unit_price = Number(it.salePrice ?? it.sale_price ?? 0);
-      const line_subtotal = qty * unit_price;
 
       let item_discount_type = 'none';
       let item_discount_value = 0;
-      let item_discount_amount = 0;
 
       if(!isOptica && discountMode === 'item'){
         const pct = clampPct(it.itemDiscountPct || 0);
         if(pct > 0){
           item_discount_type = 'pct';
           item_discount_value = pct;
-          item_discount_amount = line_subtotal * (pct/100);
         }
       }
-
-      const line_total = line_subtotal - item_discount_amount;
 
       return {
         product_id: Number(it.id),
         variant_id: it.variant_id ? Number(it.variant_id) : null,
         qty,
         unit_price,
-        line_subtotal,
         item_discount_type,
         item_discount_value,
-        item_discount_amount,
-        line_total,
         axis: it.axis ?? null,
         item_notes: it.item_notes ?? null
       };
     });
 
-    // ✅ NUEVO: payload para /orders (mínimo necesario)
     const orderPayload = {
       payment_method_id,
       notes: null,
-      items: items.map(it => ({
-        product_id: it.product_id,
-        variant_id: it.variant_id ?? null,
-        qty: it.qty,
-        unit_price: it.unit_price,
-        axis: it.axis ?? null,
-        item_notes: it.item_notes ?? null
-      }))
+      items
     };
-
-    const discTxt = isOptica
-      ? '—'
-      : (discountMode === 'order'
-          ? `${discount_value}% (pedido)`
-          : 'Por producto');
 
     const ok = await Swal.fire({
       title:'Confirmar pedido',
-      html:`Óptica: <b>${safe(isOptica ? (opticaUserContext.name || 'Óptica') : customer_name)}</b><br>Total: <b>${money(t.total)}</b><br>Descuento: <b>${safe(discTxt)}</b><br>Pago: <b>${safe(methodKey)}</b>`,
+      html:`Óptica: <b>${safe(opticaUserContext.name || 'Óptica')}</b><br>Total: <b>${money(t.total)}</b><br>Pago: <b>${safe(methodKey)}</b>`,
       icon:'question',
       showCancelButton:true,
       confirmButtonText:'Crear'
@@ -1168,17 +1081,14 @@ export async function renderPOS(outlet){
     if(!ok.isConfirmed) return;
 
     try{
-      // ✅ CAMBIO CLAVE: crear pedido
       await api.post('/orders', orderPayload);
 
-      // limpiar carrito
       cart = [];
       selectedCustomer = null;
       const hid = outlet.querySelector('#customerId');
       if(hid) hid.value = '';
       renderCart();
 
-      // recarga products+inventory (aunque el pedido no descuente stock, recargar no estorba)
       await loadCore();
       refreshInventoryTable();
       await renderCards();
@@ -1186,7 +1096,6 @@ export async function renderPOS(outlet){
       Swal.fire('Pedido registrado','Proceso completado.','success');
     }catch(err){
       console.log(orderPayload);
-
       const msg = err?.response?.data?.message || err?.message || 'Error al registrar el pedido';
       const details = err?.response?.data?.errors
         ? Object.values(err.response.data.errors).flat().map(x=>`• ${x}`).join('<br>')
