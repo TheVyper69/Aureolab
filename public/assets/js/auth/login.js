@@ -7,8 +7,10 @@ export function renderLogin(root){
     <div class="card auth-card">
       <div class="card-body p-4">
         <div class="text-center mb-3">
-          <div class="fw-bold text-brand fs-4">POS Laboratorio</div>
-          <div class="text-muted small">Acceso al sistema</div>
+          <div class="text-center mb-3">
+            <img src="./assets/images/logo.png" alt="Logo" style="max-width: 180px; height: auto;">
+          </div>
+         
         </div>
 
         <form id="loginForm" novalidate>

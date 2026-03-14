@@ -50,16 +50,62 @@ function extractError(err) {
   return data?.message || err?.message || 'Ocurrió un error';
 }
 
+function eyeIcon(open = false) {
+  if (open) {
+    return `
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16">
+        <path d="M13.359 11.238 15 12.879l-.707.707-1.744-1.744A8.717 8.717 0 0 1 8 13c-5 0-7.777-4.5-7.777-4.5a15.77 15.77 0 0 1 2.873-3.19L1 3.414l.707-.707 14 14-.707.707-1.641-1.641zM11.297 9.176l-1.468-1.468a2 2 0 0 1-2.122-2.122L6.382 4.261A3 3 0 0 0 11.297 9.176z"/>
+        <path d="M11.354 7.233a3 3 0 0 0-3.587-3.587l1.839 1.839a2 2 0 0 1 1.748 1.748z"/>
+        <path d="M8 3c5 0 7.777 4.5 7.777 4.5a15.75 15.75 0 0 1-2.223 2.592l-.72-.72A14.76 14.76 0 0 0 14.576 7.5S12.06 4 8 4c-.958 0-1.84.195-2.64.5l-.775-.775A8.725 8.725 0 0 1 8 3z"/>
+      </svg>
+    `;
+  }
+
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M16 8s-3-5.5-8-5.5S0 8 0 8s3 5.5 8 5.5S16 8 16 8zM1.173 8a13.133 13.133 0 0 1 1.66-2.043C4.12 4.668 5.88 3.5 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.133 13.133 0 0 1 14.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755C11.879 11.332 10.12 12.5 8 12.5c-2.12 0-3.879-1.168-5.168-2.457A13.134 13.134 0 0 1 1.172 8z"/>
+      <path d="M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM4.5 8a3.5 3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0z"/>
+    </svg>
+  `;
+}
+
 export async function renderUsers(outlet) {
   let users = [];
+  let editingUserId = null;
+
+  let modal = null;
+  let outletClickHandler = null;
+  let saveHandler = null;
+  let newHandler = null;
 
   async function loadData() {
     users = await usersService.list();
     users = Array.isArray(users) ? users : [];
   }
 
+  function cleanupListeners() {
+    if (outletClickHandler) {
+      outlet.removeEventListener('click', outletClickHandler);
+      outletClickHandler = null;
+    }
+
+    const btnSave = document.getElementById('btnSaveUser');
+    if (btnSave && saveHandler) {
+      btnSave.removeEventListener('click', saveHandler);
+      saveHandler = null;
+    }
+
+    const btnNew = outlet.querySelector('#btnNewUser');
+    if (btnNew && newHandler) {
+      btnNew.removeEventListener('click', newHandler);
+      newHandler = null;
+    }
+  }
+
   function renderTables() {
-    const employees = users.filter(u => u.role === 'employee');
+    cleanupListeners();
+
+    const employees = users.filter(u => u.role === 'employee' || u.role === 'admin');
     const opticas = users.filter(u => u.role === 'optica');
 
     outlet.innerHTML = `
@@ -80,6 +126,7 @@ export async function renderUsers(outlet) {
                 <th>Óptica</th>
                 <th>Rol</th>
                 <th>Estatus</th>
+                <th>Acciones</th>
               </tr>
             </thead>
             <tbody>
@@ -91,6 +138,10 @@ export async function renderUsers(outlet) {
                   <td>${safe(u.optica_nombre || '—')}</td>
                   <td><span class="badge ${roleBadge(u.role)}">${safe(u.role)}</span></td>
                   <td>${activeBadge(u.active)}</td>
+                  <td class="text-nowrap">
+                    <button class="btn btn-sm btn-outline-brand me-1" data-edit="${u.id}">Editar</button>
+                    <button class="btn btn-sm btn-outline-danger" data-del="${u.id}">Eliminar</button>
+                  </td>
                 </tr>
               `).join('')}
             </tbody>
@@ -99,7 +150,7 @@ export async function renderUsers(outlet) {
       </div>
 
       <div class="card p-3 mb-4">
-        <h5 class="mb-3">Usuarios empleados</h5>
+        <h5 class="mb-3">Usuarios empleados y admin</h5>
         <div class="table-responsive">
           <table id="tblEmployeesUsers" class="table table-striped align-middle" style="width:100%">
             <thead>
@@ -109,6 +160,7 @@ export async function renderUsers(outlet) {
                 <th>Teléfono</th>
                 <th>Rol</th>
                 <th>Estatus</th>
+                <th>Acciones</th>
               </tr>
             </thead>
             <tbody>
@@ -119,6 +171,10 @@ export async function renderUsers(outlet) {
                   <td>${safe(u.phone || '—')}</td>
                   <td><span class="badge ${roleBadge(u.role)}">${safe(u.role)}</span></td>
                   <td>${activeBadge(u.active)}</td>
+                  <td class="text-nowrap">
+                    <button class="btn btn-sm btn-outline-brand me-1" data-edit="${u.id}">Editar</button>
+                    <button class="btn btn-sm btn-outline-danger" data-del="${u.id}">Eliminar</button>
+                  </td>
                 </tr>
               `).join('')}
             </tbody>
@@ -130,19 +186,18 @@ export async function renderUsers(outlet) {
         <div class="modal-dialog modal-lg modal-dialog-scrollable">
           <div class="modal-content">
             <div class="modal-header">
-              <h5 class="modal-title">Alta de usuario</h5>
+              <h5 class="modal-title" id="userModalTitle">Alta de usuario</h5>
               <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
             </div>
 
             <div class="modal-body">
               <form id="userForm">
+                <input type="hidden" id="uId">
+
                 <div class="row g-3">
                   <div class="col-md-6">
                     <label class="form-label">Nombre</label>
                     <input class="form-control" id="uName" required>
-                    <div class="form-text" id="nameHint">
-                      Para rol óptica, este nombre también será el nombre de la óptica.
-                    </div>
                   </div>
 
                   <div class="col-md-6">
@@ -159,8 +214,8 @@ export async function renderUsers(outlet) {
                     <label class="form-label">Rol</label>
                     <select class="form-select" id="uRole" required>
                       <option value="employee">Empleado</option>
-                      <option value="optica">Óptica</option>
                       <option value="admin">Administrador</option>
+                      <option value="optica">Óptica</option>
                     </select>
                   </div>
 
@@ -184,20 +239,16 @@ export async function renderUsers(outlet) {
                   <div class="col-md-4">
                     <label class="form-label">Contraseña</label>
                     <div class="input-group">
-                      <input type="password" class="form-control" id="uPassword" required>
-                      <button type="button" class="btn btn-outline-secondary" id="btnTogglePass">
-                        Ver
-                      </button>
+                      <input type="password" class="form-control" id="uPassword">
+                      <button type="button" class="btn btn-outline-secondary" id="btnTogglePass">${eyeIcon(false)}</button>
                     </div>
                   </div>
 
                   <div class="col-md-5">
                     <label class="form-label">Confirmar contraseña</label>
                     <div class="input-group">
-                      <input type="password" class="form-control" id="uPasswordConfirm" required>
-                      <button type="button" class="btn btn-outline-secondary" id="btnTogglePass2">
-                        Ver
-                      </button>
+                      <input type="password" class="form-control" id="uPasswordConfirm">
+                      <button type="button" class="btn btn-outline-secondary" id="btnTogglePass2">${eyeIcon(false)}</button>
                     </div>
                   </div>
                 </div>
@@ -220,10 +271,11 @@ export async function renderUsers(outlet) {
 
   function wireUi() {
     const modalEl = document.getElementById('userModal');
-    const modal = new bootstrap.Modal(modalEl);
+    modal = new bootstrap.Modal(modalEl);
 
     const roleEl = document.getElementById('uRole');
     const opticaFields = document.getElementById('opticaFields');
+    const modalTitle = document.getElementById('userModalTitle');
 
     const toggleOpticaFields = () => {
       const isOptica = roleEl.value === 'optica';
@@ -241,8 +293,68 @@ export async function renderUsers(outlet) {
       btn?.addEventListener('click', () => {
         const isPassword = input.type === 'password';
         input.type = isPassword ? 'text' : 'password';
-        btn.textContent = isPassword ? 'Ocultar' : 'Ver';
+        btn.innerHTML = eyeIcon(isPassword);
       });
+    };
+
+    const resetPasswordButtons = () => {
+      const p1 = document.getElementById('uPassword');
+      const p2 = document.getElementById('uPasswordConfirm');
+      const b1 = document.getElementById('btnTogglePass');
+      const b2 = document.getElementById('btnTogglePass2');
+
+      p1.type = 'password';
+      p2.type = 'password';
+      b1.innerHTML = eyeIcon(false);
+      b2.innerHTML = eyeIcon(false);
+    };
+
+    const openCreateModal = () => {
+      editingUserId = null;
+      document.getElementById('userForm').reset();
+      document.getElementById('uId').value = '';
+      document.getElementById('uActive').value = '1';
+      document.getElementById('uRole').innerHTML = `
+        <option value="employee">Empleado</option>
+        <option value="admin">Administrador</option>
+        <option value="optica">Óptica</option>
+      `;
+      document.getElementById('uRole').value = 'employee';
+
+      modalTitle.textContent = 'Alta de usuario';
+
+      toggleOpticaFields();
+      resetPasswordButtons();
+      modal.show();
+    };
+
+    const openEditModal = (user) => {
+      editingUserId = user.id;
+      document.getElementById('uId').value = user.id ?? '';
+      document.getElementById('uName').value = user.name ?? '';
+      document.getElementById('uEmail').value = user.email ?? '';
+      document.getElementById('uPhone').value = user.phone ?? '';
+      document.getElementById('uActive').value = user.active ? '1' : '0';
+      document.getElementById('uPassword').value = '';
+      document.getElementById('uPasswordConfirm').value = '';
+      document.getElementById('uOpticaContacto').value = user.optica_contacto ?? '';
+
+      if (user.role === 'optica') {
+        document.getElementById('uRole').innerHTML = `<option value="optica">Óptica</option>`;
+        document.getElementById('uRole').value = 'optica';
+      } else {
+        document.getElementById('uRole').innerHTML = `
+          <option value="employee">Empleado</option>
+          <option value="admin">Administrador</option>
+        `;
+        document.getElementById('uRole').value = user.role ?? 'employee';
+      }
+
+      modalTitle.textContent = 'Editar usuario';
+
+      toggleOpticaFields();
+      resetPasswordButtons();
+      modal.show();
     };
 
     roleEl.addEventListener('change', toggleOpticaFields);
@@ -251,39 +363,68 @@ export async function renderUsers(outlet) {
     togglePasswordField('uPassword', 'btnTogglePass');
     togglePasswordField('uPasswordConfirm', 'btnTogglePass2');
 
-    outlet.querySelector('#btnNewUser')?.addEventListener('click', () => {
-      document.getElementById('userForm').reset();
-      document.getElementById('uActive').value = '1';
-      document.getElementById('uRole').value = 'employee';
-      toggleOpticaFields();
+    newHandler = () => openCreateModal();
+    outlet.querySelector('#btnNewUser')?.addEventListener('click', newHandler);
 
-      const p1 = document.getElementById('uPassword');
-      const p2 = document.getElementById('uPasswordConfirm');
-      const b1 = document.getElementById('btnTogglePass');
-      const b2 = document.getElementById('btnTogglePass2');
+    outletClickHandler = async (e) => {
+      const editBtn = e.target.closest('[data-edit]');
+      const delBtn = e.target.closest('[data-del]');
 
-      p1.type = 'password';
-      p2.type = 'password';
-      b1.textContent = 'Ver';
-      b2.textContent = 'Ver';
+      if (editBtn) {
+        const editId = editBtn.dataset.edit;
+        const user = users.find(x => String(x.id) === String(editId));
+        if (!user) {
+          Swal.fire('No encontrado', 'No se encontró el usuario.', 'info');
+          return;
+        }
+        openEditModal(user);
+        return;
+      }
 
-      modal.show();
-    });
+      if (delBtn) {
+        const delId = delBtn.dataset.del;
 
-    document.getElementById('btnSaveUser')?.addEventListener('click', async () => {
+        const confirm = await Swal.fire({
+          title: '¿Eliminar usuario?',
+          text: 'Esta acción puede afectar registros relacionados.',
+          icon: 'warning',
+          showCancelButton: true,
+          confirmButtonText: 'Sí, eliminar',
+          cancelButtonText: 'Cancelar'
+        });
+
+        if (!confirm.isConfirmed) return;
+
+        try {
+          await usersService.remove(delId);
+          await loadData();
+          renderTables();
+          Swal.fire('Eliminado', 'Usuario eliminado correctamente.', 'success');
+        } catch (err) {
+          Swal.fire('Error', extractError(err), 'error');
+        }
+      }
+    };
+
+    outlet.addEventListener('click', outletClickHandler);
+
+    saveHandler = async () => {
+      const isEdit = !!editingUserId;
+
       const payload = {
         name: document.getElementById('uName').value.trim(),
         email: document.getElementById('uEmail').value.trim(),
         phone: document.getElementById('uPhone').value.trim() || null,
         role: document.getElementById('uRole').value,
         optica_contacto: document.getElementById('uOpticaContacto').value.trim() || null,
-        password: document.getElementById('uPassword').value,
-        password_confirmation: document.getElementById('uPasswordConfirm').value,
         active: document.getElementById('uActive').value === '1'
       };
 
-      if (!payload.name || !payload.email || !payload.role || !payload.password || !payload.password_confirmation) {
-        Swal.fire('Faltan datos', 'Completa todos los campos obligatorios.', 'info');
+      const password = document.getElementById('uPassword').value;
+      const passwordConfirmation = document.getElementById('uPasswordConfirm').value;
+
+      if (!payload.name || !payload.email || !payload.role) {
+        Swal.fire('Faltan datos', 'Completa nombre, email y rol.', 'info');
         return;
       }
 
@@ -292,21 +433,51 @@ export async function renderUsers(outlet) {
         return;
       }
 
-      if (payload.password !== payload.password_confirmation) {
-        Swal.fire('Contraseña inválida', 'Las contraseñas no coinciden.', 'warning');
-        return;
+      if (!isEdit) {
+        if (!password || !passwordConfirmation) {
+          Swal.fire('Faltan datos', 'La contraseña es obligatoria al crear.', 'info');
+          return;
+        }
+
+        if (password !== passwordConfirmation) {
+          Swal.fire('Contraseña inválida', 'Las contraseñas no coinciden.', 'warning');
+          return;
+        }
+
+        payload.password = password;
+        payload.password_confirmation = passwordConfirmation;
+      } else if (password || passwordConfirmation) {
+        if (password !== passwordConfirmation) {
+          Swal.fire('Contraseña inválida', 'Las contraseñas no coinciden.', 'warning');
+          return;
+        }
+
+        payload.password = password;
+        payload.password_confirmation = passwordConfirmation;
       }
 
       try {
-        await usersService.create(payload);
+        if (isEdit) {
+          await usersService.update(editingUserId, payload);
+        } else {
+          await usersService.create(payload);
+        }
+
         modal.hide();
         await loadData();
         renderTables();
-        Swal.fire('Guardado', 'Usuario creado correctamente.', 'success');
+
+        Swal.fire(
+          'Guardado',
+          isEdit ? 'Usuario actualizado correctamente.' : 'Usuario creado correctamente.',
+          'success'
+        );
       } catch (err) {
         Swal.fire('Error', extractError(err), 'error');
       }
-    });
+    };
+
+    document.getElementById('btnSaveUser')?.addEventListener('click', saveHandler);
   }
 
   await loadData();

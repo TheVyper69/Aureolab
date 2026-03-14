@@ -8,6 +8,14 @@ class UsersService {
   async create(payload) {
     return (await api.post('/auth/register', payload)).data;
   }
+
+  async update(id, payload) {
+    return (await api.put(`/users/${id}`, payload)).data;
+  }
+
+  async remove(id) {
+    return (await api.delete(`/users/${id}`)).data;
+  }
 }
 
 export const usersService = new UsersService();
